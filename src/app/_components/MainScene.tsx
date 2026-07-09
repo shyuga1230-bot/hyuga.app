@@ -85,7 +85,7 @@ export default function MainScene({
   const [yearDays, setYearDays] = useState("---");
   const [todayLeft, setTodayLeft] = useState("--時間--分--秒");
   const [dreamMeta, setDreamMeta] = useState<
-    { label: string; days: string; y: number }[]
+    { label: string; days: string; y: number; hc: number }[]
   >([]);
   const [goalOpen, setGoalOpen] = useState(false);
   const [goalLabel, setGoalLabel] = useState("");
@@ -260,11 +260,16 @@ export default function MainScene({
         p.dreams
           .map((d) => ({ d, f: dreamFrac(p, d) }))
           .filter(({ f }) => f > 0 && f < 1)
-          .map(({ d, f }) => ({
-            label: d.label,
-            days: nf(dreamRemainDays(p, d)),
-            y: cy + R - 2 * R * f,
-          })),
+          .map(({ d, f }) => {
+            const y = cy + R - 2 * R * f;
+            const dd = Math.abs(y - cy);
+            return {
+              label: d.label,
+              days: nf(dreamRemainDays(p, d)),
+              y,
+              hc: R * Math.sqrt(Math.max(0.05, 1 - (dd / R) * (dd / R))),
+            };
+          }),
       );
     }
     const first = setTimeout(place, 0);
@@ -382,17 +387,58 @@ export default function MainScene({
   );
   const railTop = 92 - railT * 84;
 
-  /* 夢ラベルはズームに追従し、大きく寄ったら静かに消える */
-  const dreamTop = (rawY: number): number | null => {
-    if (zoomZ >= 2.6) return null;
-    const hWin = typeof window !== "undefined" ? window.innerHeight : 0;
-    if (hWin <= 0) return null;
-    const g = sphereGeom(window.innerWidth, hWin);
+  /* 夢ラベル: ズームに追従し、重なりは上下に散らし、リーダー線でリングと結ぶ */
+  type PlacedDream = {
+    label: string;
+    days: string;
+    ringY: number; /* リングの実スクリーンy */
+    labelY: number; /* 重なり解消後のラベルy */
+    ringLeftX: number;
+  };
+  const placedDreams: PlacedDream[] = (() => {
+    if (zoomZ >= 2.6 || typeof window === "undefined") return [];
+    const hWin = window.innerHeight;
+    const wWin = window.innerWidth;
+    if (hWin <= 0) return [];
+    const g = sphereGeom(wWin, hWin);
     const k = Math.min(1, Math.max(0, (zoomZ - 1) / 3));
     const fy = hWin * 0.5 + (g.botY + hWin * 0.04 - hWin * 0.5) * k;
-    const t = fy + (rawY - fy) * zoomZ;
-    return t > hWin * 0.05 && t < hWin * 0.9 ? t : null;
-  };
+    const items = dreamMeta
+      .map((m) => {
+        const ringY = fy + (m.y - fy) * zoomZ;
+        return {
+          label: m.label,
+          days: m.days,
+          ringY,
+          labelY: ringY,
+          ringLeftX: wWin / 2 - m.hc * zoomZ,
+        };
+      })
+      .filter((m) => m.ringY > hWin * 0.05 && m.ringY < hWin * 0.9)
+      .sort((a, b) => a.ringY - b.ringY);
+    /* 最小間隔で押し広げる */
+    const GAP = 26;
+    for (let i = 1; i < items.length; i++) {
+      if (items[i].labelY < items[i - 1].labelY + GAP) {
+        items[i].labelY = items[i - 1].labelY + GAP;
+      }
+    }
+    const maxY = hWin * 0.9;
+    const over = items.length ? items[items.length - 1].labelY - maxY : 0;
+    if (over > 0) {
+      for (const it of items) it.labelY -= over;
+      for (let i = items.length - 2; i >= 0; i--) {
+        if (items[i].labelY > items[i + 1].labelY - GAP) {
+          items[i].labelY = items[i + 1].labelY - GAP;
+        }
+      }
+    }
+    return items;
+  })();
+  const labelRightX =
+    typeof window !== "undefined"
+      ? window.innerWidth * 0.04 + Math.min(window.innerWidth * 0.26, 300)
+      : 0;
 
   return (
     <div className="stage" style={vars}>
@@ -428,13 +474,30 @@ export default function MainScene({
 
         {!hintGone && <p className="ui-zoomhint">スクロールで、時間に近づく</p>}
 
-        {dreamMeta.map((m, i) => {
-          const t = dreamTop(m.y);
-          if (t === null) return null;
+        {placedDreams.map((m, i) => {
+          const x1 = labelRightX + 8;
+          const x2 = m.ringLeftX - 8;
+          const dx = x2 - x1;
+          const dy = m.ringY - m.labelY;
+          const len = Math.max(0, Math.hypot(dx, dy));
+          const ang = Math.atan2(dy, dx);
           return (
-            <div key={`${m.label}-${i}`} className="ui-dream" style={{ top: t - 10 }}>
-              <span className="ui-dream-label">{m.label}</span>
-              <span className="ui-dream-days">この深さまで、あと {m.days} 日</span>
+            <div key={`${m.label}-${i}`}>
+              <div className="ui-dream" style={{ top: m.labelY - 9 }}>
+                <span className="ui-dream-label">{m.label}</span>
+                <span className="ui-dream-days">あと {m.days} 日</span>
+              </div>
+              {dx > 12 && (
+                <div
+                  className="ui-dream-line"
+                  style={{
+                    left: x1,
+                    top: m.labelY,
+                    width: len,
+                    transform: `rotate(${ang}rad)`,
+                  }}
+                />
+              )}
             </div>
           );
         })}

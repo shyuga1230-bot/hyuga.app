@@ -344,27 +344,42 @@ body {
   position: absolute;
   left: 4%;
   width: min(26%, 300px);
-  text-align: right;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-direction: row;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 10px;
+  white-space: nowrap;
 }
 
 .ui-dream-label {
   font-family: var(--mincho);
   font-size: 12px;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.14em;
   color: var(--f-acc);
   text-shadow: 0 0 8px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .ui-dream-days {
   font-family: var(--mono);
   font-size: 10px;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   color: var(--f-dim);
   white-space: nowrap;
   text-shadow: 0 0 8px rgba(0, 0, 0, 0.35);
+  flex-shrink: 0;
+}
+
+.ui-dream-line {
+  position: absolute;
+  height: 1px;
+  background: var(--f-acc);
+  opacity: 0.35;
+  transform-origin: 0 50%;
+  pointer-events: none;
 }
 
 .ui-goal {
