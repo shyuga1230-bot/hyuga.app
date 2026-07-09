@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createGlSand } from "../_lib/glsand";
 import { bandForDate, MONO, type Band } from "../_lib/palette";
 import { createScene, sphereGeom } from "../_lib/scene";
 import type { Profile } from "../_lib/store";
@@ -25,6 +26,7 @@ export default function MainScene({
   onReset: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const glCanvasRef = useRef<HTMLCanvasElement>(null);
   const profileRef = useRef(profile);
   useEffect(() => {
     profileRef.current = profile;
@@ -43,10 +45,24 @@ export default function MainScene({
   const dream = profile.dreams[0] ?? null;
   const pal = MONO[band];
 
-  /* Canvas シーン */
+  /* Canvas シーン(+可能なら WebGL パーティクルレイヤー) */
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    let glSand: ReturnType<typeof createGlSand> | null = null;
+    if (!reduced && glCanvasRef.current) {
+      try {
+        glSand = createGlSand(glCanvasRef.current, {
+          getRemainFrac: () => remainFrac(profileRef.current),
+          getBand: () => bandForDate(new Date()),
+        });
+      } catch {
+        glSand = null; // WebGL2 が無ければ 2D の砂にフォールバック
+      }
+    }
+
     const scene = createScene(canvas, {
       getRemainFrac: () => remainFrac(profileRef.current),
       getDreamFrac: () => {
@@ -54,8 +70,12 @@ export default function MainScene({
         return d ? dreamFrac(profileRef.current, d) : null;
       },
       getBand: () => bandForDate(new Date()),
+      drawSpills: !glSand,
     });
-    return () => scene.destroy();
+    return () => {
+      scene.destroy();
+      glSand?.destroy();
+    };
   }, []);
 
   /* 減り続けるカウンター */
@@ -143,6 +163,7 @@ export default function MainScene({
   return (
     <div className="stage" style={vars}>
       <canvas ref={canvasRef} className="stage-canvas" aria-hidden="true" />
+      <canvas ref={glCanvasRef} className="stage-canvas" aria-hidden="true" />
 
       <div className={`stage-ui ${idle ? "is-idle" : ""}`}>
         <span className="ui-nokori" aria-hidden="true">

@@ -12,6 +12,8 @@ export type SceneOpts = {
   /** 夢に到達する瞬間の残り割合(0..1)。なければ null */
   getDreamFrac: () => number | null;
   getBand: () => Band;
+  /** WebGL レイヤーが落下砂を描くときは false(2D 側の砂は止める) */
+  drawSpills?: boolean;
 };
 
 export type SceneHandle = {
@@ -46,6 +48,7 @@ function mix(h1: string, h2: string, t: number): string {
 }
 
 export function createScene(canvas: HTMLCanvasElement, opts: SceneOpts): SceneHandle {
+  const doSpills = opts.drawSpills !== false;
   const reduced =
     typeof matchMedia !== "undefined" &&
     matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -296,11 +299,11 @@ export function createScene(canvas: HTMLCanvasElement, opts: SceneOpts): SceneHa
     ctx.fillStyle = core;
     ctx.fillRect(cx - 1.2, botY, 2.4, h * 0.79 - botY);
 
-    /* まだらに散らばり落ちる砂 */
+    /* まだらに散らばり落ちる砂(WebGL レイヤーがあるときはそちらに任せる) */
     if (dark) ctx.globalCompositeOperation = "lighter";
     const fadeStart = h * 0.7;
     const fadeEnd = h * 0.795;
-    for (const s of spills) {
+    for (const s of doSpills ? spills : []) {
       const a = s.y < fadeStart ? 1 : Math.max(0, 1 - (s.y - fadeStart) / (fadeEnd - fadeStart));
       if (a <= 0) continue;
       if (dark) {
@@ -336,6 +339,7 @@ export function createScene(canvas: HTMLCanvasElement, opts: SceneOpts): SceneHa
   }
 
   function step(dt: number) {
+    if (!doSpills) return;
     const g = sphereGeom(w, h);
     burstT -= dt;
     if (burstT <= 0) {
