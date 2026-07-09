@@ -1,8 +1,10 @@
 /* 無白 service worker — ホーム画面起動とオフライン用の最小シェルキャッシュ */
 const CACHE = "muhaku-v1";
+/* 配信ディレクトリ基準("/" 直下でも GitHub Pages のサブパスでも動く) */
+const SHELL = new URL("./", self.location).pathname;
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.add("/")));
+  e.waitUntil(caches.open(CACHE).then((c) => c.add(SHELL)));
   self.skipWaiting();
 });
 
@@ -18,10 +20,10 @@ self.addEventListener("fetch", (e) => {
       fetch(req)
         .then((r) => {
           const cp = r.clone();
-          caches.open(CACHE).then((c) => c.put("/", cp));
+          caches.open(CACHE).then((c) => c.put(SHELL, cp));
           return r;
         })
-        .catch(() => caches.match("/")),
+        .catch(() => caches.match(SHELL)),
     );
     return;
   }

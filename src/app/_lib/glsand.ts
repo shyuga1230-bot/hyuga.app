@@ -12,10 +12,13 @@ import { sphereGeom } from "./scene";
  * その上にポイントスプライトの砂(こぼれ+渦)を重ねる。
  */
 
+/** 0=通常(琥珀) 1=達成(白く静かに) 2=接近(脈動) */
+export type DreamRing = { f: number; state: number };
+
 export type GlSandOpts = {
   getRemainFrac: () => number;
-  /** 各目標に到達する瞬間の残り割合(0..1)。最大8つまで描画 */
-  getDreamFracs: () => number[];
+  /** 各目標に到達する瞬間の残り割合と状態。最大8つまで描画 */
+  getDreamRings: () => DreamRing[];
   getBand: () => Band;
   /** 連続ズームの目標倍率(0.5〜8)。省略時は 1 */
   getZoomTarget?: () => number;
@@ -52,6 +55,7 @@ uniform vec2 u_res;
 uniform float u_time;
 uniform float u_remain;
 uniform float u_dreams[8]; // 各目標の残り割合(0..1)
+uniform float u_dreamState[8]; // 0=通常 1=達成 2=接近
 uniform float u_dreamCount;
 uniform float u_dark;
 uniform vec3 u_bgTop;
@@ -292,16 +296,26 @@ void main() {
     float spec = pow(max(dot(N1, H), 0.0), 90.0);
     col += vec3(1.0) * spec * (u_dark > 0.5 ? 0.45 : 0.5);
 
-    /* 夢のリング: 球面上の発光緯線(目標の数だけ) */
+    /* 夢のリング: 球面上の発光緯線(目標の数だけ)
+       通常=琥珀 / 達成=白く静かに / 接近=脈動 */
     for (int di = 0; di < 8; di++) {
       if (float(di) >= u_dreamCount) break;
       float fD = u_dreams[di];
       if (fD <= 0.0 || fD >= 1.0) continue;
+      float st = u_dreamState[di];
       float ringY = c.y + R - 2.0 * R * fD;
       float dy = P1.y - ringY;
       float ringGlow = exp(-dy * dy / 6.0);
       float frontW = 0.45 - 0.55 * (P1.z / R); /* 手前ほど強い */
-      col += u_accent * ringGlow * frontW * (u_dark > 0.5 ? 1.1 : 0.8);
+      float amp = u_dark > 0.5 ? 1.1 : 0.8;
+      vec3 ringCol = u_accent;
+      if (st > 1.5) {
+        amp *= 0.7 + 0.45 * sin(u_time * 3.0);
+      } else if (st > 0.5) {
+        ringCol = u_dark > 0.5 ? vec3(0.92, 0.92, 0.88) : vec3(0.32, 0.32, 0.3);
+        amp *= 0.35;
+      }
+      col += ringCol * ringGlow * frontW * amp;
     }
   }
 
@@ -596,6 +610,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     alpha: false,
     premultipliedAlpha: true,
     antialias: false,
+    preserveDrawingBuffer: true, /* 「この画を保存する」用 */
   });
   if (!glMaybe) throw new Error("webgl2 unavailable");
   const gl: WebGL2RenderingContext = glMaybe;
@@ -618,7 +633,8 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   const sceneU = {
     res: U(sceneProg, "u_res"), time: U(sceneProg, "u_time"),
     remain: U(sceneProg, "u_remain"),
-    dreams: U(sceneProg, "u_dreams"), dreamCount: U(sceneProg, "u_dreamCount"),
+    dreams: U(sceneProg, "u_dreams"), dreamState: U(sceneProg, "u_dreamState"),
+    dreamCount: U(sceneProg, "u_dreamCount"),
     dark: U(sceneProg, "u_dark"),
     bgTop: U(sceneProg, "u_bgTop"), bgBottom: U(sceneProg, "u_bgBottom"),
     glow: U(sceneProg, "u_glow"),
@@ -781,12 +797,19 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     return { fbo, tex };
   }
 
+  /* 実測FPSに応じた自動品質調整(下げるだけ・揺り戻さない) */
+  const SS_TABLE = [1.6, 1.15, 0.9];
+  const SPILL_DIV = [1, 2, 4];
+  let quality = 0;
+  let frameEma = 16;
+  let qualityT = 0;
+
   function fit() {
     const host = canvas.parentElement ?? document.body;
     w = host.clientWidth;
     h = host.clientHeight;
-    /* スーパーサンプリング: ネイティブDPR × 1.6、ピクセル予算内で自動調整 */
-    const SS = 1.6;
+    /* スーパーサンプリング: ネイティブDPR × 品質係数、ピクセル予算内で自動調整 */
+    const SS = SS_TABLE[quality];
     const budget = 9_000_000;
     let scale = Math.min(window.devicePixelRatio || 1, 3) * SS;
     if (w * h * scale * scale > budget) {
@@ -941,7 +964,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     const dark = pal.dark;
     const hi = hexVec(pal.sandHi);
     const lo = hexVec(pal.sandLo);
-    const dreamFracs = opts.getDreamFracs();
+    const dreamRings = opts.getDreamRings();
 
     /* 連続ズーム: 目標へなめらかに追従。寄るほど焦点が排出口へ移る */
     const zt = Math.min(8, Math.max(0.5, opts.getZoomTarget ? opts.getZoomTarget() : 1));
@@ -960,9 +983,14 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     gl.uniform1f(sceneU.time, timeS);
     gl.uniform1f(sceneU.remain, opts.getRemainFrac());
     const dreamArr = new Float32Array(8);
-    const dreamN = Math.min(8, dreamFracs.length);
-    for (let i = 0; i < dreamN; i++) dreamArr[i] = dreamFracs[i];
+    const stateArr = new Float32Array(8);
+    const dreamN = Math.min(8, dreamRings.length);
+    for (let i = 0; i < dreamN; i++) {
+      dreamArr[i] = dreamRings[i].f;
+      stateArr[i] = dreamRings[i].state;
+    }
     gl.uniform1fv(sceneU.dreams, dreamArr);
+    gl.uniform1fv(sceneU.dreamState, stateArr);
     gl.uniform1f(sceneU.dreamCount, dreamN);
     gl.uniform1f(sceneU.dark, dark ? 1 : 0);
     const setv = (loc: WebGLUniformLocation | null, hex: string) => {
@@ -1017,7 +1045,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
       gl.uniform1f(spillU.zoom, zCur);
       gl.uniform2f(spillU.focus, fx, fy);
       gl.bindVertexArray(vaoSim[cur]);
-      gl.drawArrays(gl.POINTS, 0, SPILL_N);
+      gl.drawArrays(gl.POINTS, 0, Math.floor(SPILL_N / SPILL_DIV[quality]));
       gl.bindVertexArray(null);
       gl.disable(gl.BLEND);
     }
@@ -1179,11 +1207,24 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   let destroyed = false;
   const loop = (t: number) => {
     if (destroyed) return;
-    const dt = Math.min(0.05, (t - last) / 1000);
+    const rawDt = t - last;
+    const dt = Math.min(0.05, rawDt / 1000);
     last = t;
     if (!document.hidden) {
       step(dt);
       render(t * 0.001);
+      /* 端末が追いつかなければ品質を一段ずつ落とす */
+      frameEma = frameEma * 0.92 + Math.min(100, rawDt) * 0.08;
+      qualityT += rawDt;
+      if (qualityT > 2500) {
+        qualityT = 0;
+        if (frameEma > 26 && quality < 2) {
+          quality++;
+          frameEma = 16;
+          fit();
+          spills = [];
+        }
+      }
     }
     raf = requestAnimationFrame(loop);
   };

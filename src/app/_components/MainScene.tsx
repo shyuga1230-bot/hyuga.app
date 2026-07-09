@@ -1,13 +1,35 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { createGlSand, type GlSandHandle } from "../_lib/glsand";
+import {
+  getLangSnapshot,
+  getServerLangSnapshot,
+  subscribeLang,
+  tr,
+  type StrKey,
+} from "../_lib/i18n";
 import { bandForDate, MONO, type Band } from "../_lib/palette";
 import { createScene, sphereGeom } from "../_lib/scene";
 import { createSound, type SoundHandle } from "../_lib/sound";
-import { saveProfile, type Profile } from "../_lib/store";
 import {
+  exportProfile,
+  importProfile,
+  readVisit,
+  saveProfile,
+  writeVisit,
+  type Profile,
+} from "../_lib/store";
+import {
+  birthMs,
   DAY_MS,
+  deathMs,
   dreamFrac,
   dreamRemainDays,
   nf,
@@ -15,11 +37,13 @@ import {
   remainFrac,
   remainPct,
 } from "../_lib/time";
+import LangToggle from "./LangToggle";
 
 const IDLE_MS = 45_000;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 8;
 const MUTE_KEY = "muhaku.sound.v1";
+const NEAR_DAYS = 60;
 
 /* 初回リビール: 満ちる → 一拍 → 生きたぶんが一気に抜ける → 残りだけが残る */
 const REVEAL_FILL = 4000;
@@ -55,12 +79,15 @@ function zoomLevel(z: number): ZoomLevel {
   return "life";
 }
 
-const RAIL = [
-  { label: "秒", top: 8, level: "sec" as ZoomLevel },
-  { label: "日", top: 36, level: "day" as ZoomLevel },
-  { label: "年", top: 64, level: "year" as ZoomLevel },
-  { label: "生", top: 92, level: "life" as ZoomLevel },
-];
+function localDayKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function localWeekKey(d: Date): string {
+  const jan1 = new Date(d.getFullYear(), 0, 1);
+  const doy = Math.floor((d.getTime() - jan1.getTime()) / DAY_MS);
+  return `${d.getFullYear()}-W${Math.floor(doy / 7)}`;
+}
 
 export default function MainScene({
   profile,
@@ -78,34 +105,76 @@ export default function MainScene({
     profileRef.current = profile;
   }, [profile]);
 
+  const lang = useSyncExternalStore(
+    subscribeLang,
+    getLangSnapshot,
+    getServerLangSnapshot,
+  );
+  const t = (key: StrKey, vars?: Record<string, string | number>) =>
+    tr(lang, key, vars);
+
   const [band, setBand] = useState<Band>(() => bandForDate(new Date()));
   const [pctMain, setPctMain] = useState("--.-");
   const [pctTail, setPctTail] = useState("------");
   const [days, setDays] = useState("--,---");
   const [yearDays, setYearDays] = useState("---");
-  const [todayLeft, setTodayLeft] = useState("--時間--分--秒");
+  const [todayLeft, setTodayLeft] = useState("--:--:--");
+  const [ariaText, setAriaText] = useState("");
   const [dreamMeta, setDreamMeta] = useState<
-    { label: string; days: string; y: number; hc: number }[]
+    { label: string; days: string; y: number; hc: number; done: boolean }[]
   >([]);
   const [goalOpen, setGoalOpen] = useState(false);
   const [goalLabel, setGoalLabel] = useState("");
   const [goalAge, setGoalAge] = useState("");
   const [goalErr, setGoalErr] = useState("");
+  const [lifeEdit, setLifeEdit] = useState("");
+  const [pastOpen, setPastOpen] = useState(false);
+  const [pastMsg, setPastMsg] = useState("");
+  const [elapsedDays, setElapsedDays] = useState(0);
+  const [moment, setMoment] = useState<string | null>(null);
   const [idle, setIdle] = useState(false);
   const [revealVisible, setRevealVisible] = useState(false);
   const [cinematic, setCinematic] = useState(reveal);
   const [confirming, setConfirming] = useState(false);
   const [zoomZ, setZoomZ] = useState(1);
+  const [hintIdx, setHintIdx] = useState(0);
   const [hintGone, setHintGone] = useState(false);
   const [muted, setMuted] = useState(false);
   const zoomTargetRef = useRef(1);
   const glHandleRef = useRef<GlSandHandle | null>(null);
   const soundRef = useRef<SoundHandle | null>(null);
   const revealT0 = useRef<number | null>(null);
+  const momentTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const importRef = useRef<HTMLInputElement>(null);
 
   const pal = MONO[band];
 
-  /* Canvas シーン(+可能なら WebGL パーティクルレイヤー) */
+  /* 重い描画ループ中は CSS アニメーションが開始待ちのまま止まることがある
+     (from が opacity:0 だと中身が永遠に見えない)。保留中のものを強制開始する */
+  useEffect(() => {
+    if (!(goalOpen || pastOpen || moment || revealVisible)) return;
+    const kick = () => {
+      for (const a of document.getAnimations()) {
+        if (a.startTime === null && a.playState === "running") {
+          a.startTime = document.timeline.currentTime;
+        }
+      }
+    };
+    const t1 = window.setTimeout(kick, 80);
+    const t2 = window.setTimeout(kick, 400);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, [goalOpen, pastOpen, moment, revealVisible]);
+
+  function showMoment(text: string) {
+    clearTimeout(momentTimer.current);
+    setMoment(text);
+    momentTimer.current = setTimeout(() => setMoment(null), 5200);
+  }
+
+  /* Canvas シーン(+可能なら WebGL レイヤー) */
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -113,8 +182,13 @@ export default function MainScene({
 
     if (reveal && !reduced) revealT0.current = performance.now();
 
-    const getDreams = () =>
-      profileRef.current.dreams.map((d) => dreamFrac(profileRef.current, d));
+    const getRings = () =>
+      profileRef.current.dreams.map((d) => {
+        const f = dreamFrac(profileRef.current, d);
+        const left = dreamRemainDays(profileRef.current, d);
+        const state = d.done ? 1 : left > 0 && left <= NEAR_DAYS ? 2 : 0;
+        return { f, state };
+      });
     const getFrac = () =>
       revealAnim(revealT0.current, remainFrac(profileRef.current)).f;
     const getSpill = () =>
@@ -125,7 +199,7 @@ export default function MainScene({
       try {
         glSand = createGlSand(glCanvasRef.current, {
           getRemainFrac: getFrac,
-          getDreamFracs: getDreams,
+          getDreamRings: getRings,
           getBand: () => bandForDate(new Date()),
           getZoomTarget: () => zoomTargetRef.current,
           getSpillScale: getSpill,
@@ -160,7 +234,7 @@ export default function MainScene({
     if (!glSand) {
       scene = createScene(canvas, {
         getRemainFrac: getFrac,
-        getDreamFracs: getDreams,
+        getDreamRings: getRings,
         getBand: () => bandForDate(new Date()),
         drawSpills: true,
       });
@@ -175,50 +249,26 @@ export default function MainScene({
     };
   }, [reveal]);
 
-  /* 連続ズーム: ホイールとピンチ */
+  /* 今日の一粒・週次サマリー */
   useEffect(() => {
-    const bump = (factor: number) => {
-      zoomTargetRef.current = Math.min(
-        ZOOM_MAX,
-        Math.max(ZOOM_MIN, zoomTargetRef.current * factor),
-      );
-      setHintGone(true);
-    };
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      bump(Math.exp(-e.deltaY * 0.0014));
-    };
-    const pts = new Map<number, { x: number; y: number }>();
-    let lastDist = 0;
-    const onDown = (e: PointerEvent) => {
-      if (e.pointerType === "touch") pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    };
-    const onMove = (e: PointerEvent) => {
-      if (!pts.has(e.pointerId)) return;
-      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (pts.size === 2) {
-        const [a, b] = [...pts.values()];
-        const dist = Math.hypot(a.x - b.x, a.y - b.y);
-        if (lastDist > 0) bump(dist / lastDist);
-        lastDist = dist;
+    const timer = setTimeout(() => {
+      const now = new Date();
+      const dayKey = localDayKey(now);
+      const weekKey = localWeekKey(now);
+      const prev = readVisit();
+      writeVisit({ day: dayKey, week: weekKey });
+      if (reveal || !prev) return;
+      if (prev.week !== weekKey) {
+        const p = profileRef.current;
+        const lifeDaysTotal = (deathMs(p) - birthMs(p)) / DAY_MS;
+        const pct = ((7 / lifeDaysTotal) * 100).toFixed(4);
+        showMoment(tr(getLangSnapshot(), "weekly", { pct }));
+      } else if (prev.day !== dayKey) {
+        showMoment(tr(getLangSnapshot(), "daily"));
       }
-    };
-    const onUp = (e: PointerEvent) => {
-      pts.delete(e.pointerId);
-      lastDist = 0;
-    };
-    window.addEventListener("wheel", onWheel, { passive: false });
-    window.addEventListener("pointerdown", onDown);
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-    return () => {
-      window.removeEventListener("wheel", onWheel);
-      window.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
-    };
+    }, 900);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* 減り続けるカウンター */
@@ -242,16 +292,25 @@ export default function MainScene({
       const mm = Math.floor(ms / 60_000) % 60;
       const ss = Math.floor(ms / 1000) % 60;
       setTodayLeft(
-        `${hh}時間${String(mm).padStart(2, "0")}分${String(ss).padStart(2, "0")}秒`,
+        `${hh}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`,
       );
     }, 1000);
+    const aria = setInterval(() => {
+      setAriaText(
+        tr(getLangSnapshot(), "ariaStatus", {
+          pct: remainPct(profileRef.current, 2),
+          days: nf(remainDays(profileRef.current)),
+        }),
+      );
+    }, 60_000);
     return () => {
       clearInterval(fast);
       clearInterval(slow);
+      clearInterval(aria);
     };
   }, []);
 
-  /* 夢の緯線ラベル(各目標をリングと同じ幾何で配置) */
+  /* 夢ラベル(各目標をリングと同じ幾何で配置) */
   useEffect(() => {
     function place() {
       const p = profileRef.current;
@@ -268,21 +327,93 @@ export default function MainScene({
               days: nf(dreamRemainDays(p, d)),
               y,
               hc: R * Math.sqrt(Math.max(0.05, 1 - (dd / R) * (dd / R))),
+              done: !!d.done,
             };
           }),
       );
     }
     const first = setTimeout(place, 0);
     window.addEventListener("resize", place);
-    const t = setInterval(place, 60_000);
+    const iv = setInterval(place, 60_000);
     return () => {
       clearTimeout(first);
       window.removeEventListener("resize", place);
-      clearInterval(t);
+      clearInterval(iv);
     };
   }, [profile]);
 
-  /* 非操作時、UIは静かに消える */
+  /* 連続ズーム: ホイール・ピンチ・キーボード */
+  useEffect(() => {
+    const bump = (factor: number) => {
+      zoomTargetRef.current = Math.min(
+        ZOOM_MAX,
+        Math.max(ZOOM_MIN, zoomTargetRef.current * factor),
+      );
+      setHintGone(true);
+    };
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      bump(Math.exp(-e.deltaY * 0.0014));
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "+" || e.key === "=") bump(1.3);
+      else if (e.key === "-" || e.key === "_") bump(1 / 1.3);
+      else if (e.key === "0") {
+        zoomTargetRef.current = 1;
+        setHintGone(true);
+      }
+    };
+    const pts = new Map<number, { x: number; y: number }>();
+    let lastDist = 0;
+    const onDown = (e: PointerEvent) => {
+      if (e.pointerType === "touch") pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        if (lastDist > 0) bump(dist / lastDist);
+        lastDist = dist;
+      }
+    };
+    const onUp = (e: PointerEvent) => {
+      pts.delete(e.pointerId);
+      lastDist = 0;
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerdown", onDown);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, []);
+
+  /* ヒントの巡回(ズーム→移ろい→音) */
+  useEffect(() => {
+    if (hintGone) return;
+    const iv = setInterval(() => {
+      setHintIdx((i) => {
+        if (i >= 5) {
+          setHintGone(true);
+          return i;
+        }
+        return i + 1;
+      });
+    }, 5500);
+    return () => clearInterval(iv);
+  }, [hintGone]);
+
+  /* 非操作時、UIは淡く沈む(完全には消さない) */
   useEffect(() => {
     let timer = setTimeout(() => setIdle(true), IDLE_MS);
     const wake = () => {
@@ -324,7 +455,7 @@ export default function MainScene({
     window.localStorage.setItem(MUTE_KEY, next ? "off" : "on");
   }
 
-  /* 目標の追加・削除 */
+  /* 目標の追加・達成・削除、終わりの決めなおし */
   function currentAge(): number {
     const b = new Date(profile.birth + "T00:00:00");
     return Math.floor((Date.now() - b.getTime()) / (365.2425 * DAY_MS));
@@ -333,22 +464,11 @@ export default function MainScene({
   function addGoal() {
     const label = goalLabel.trim();
     const age = Number(goalAge);
-    if (profile.dreams.length >= 8) {
-      setGoalErr("その器には、これ以上刻めません。(8つまで)");
-      return;
-    }
-    if (!label) {
-      setGoalErr("ひとつで、かまいません。");
-      return;
-    }
-    if (!Number.isFinite(age) || age <= currentAge()) {
-      setGoalErr("その歳は、もう通り過ぎました。");
-      return;
-    }
-    if (age > profile.lifeYears) {
-      setGoalErr("それは、終わりのあとになっています。");
-      return;
-    }
+    if (profile.dreams.length >= 8) return setGoalErr(t("errDreamFull"));
+    if (!label) return setGoalErr(t("errDreamEmpty"));
+    if (!Number.isFinite(age) || age <= currentAge())
+      return setGoalErr(t("errAgePast"));
+    if (age > profile.lifeYears) return setGoalErr(t("errAgeAfterEnd"));
     const dreams = [...profile.dreams, { label, age }].sort((a, b) => a.age - b.age);
     saveProfile({ ...profile, dreams });
     setGoalLabel("");
@@ -356,10 +476,84 @@ export default function MainScene({
     setGoalErr("");
   }
 
-  function removeGoal(i: number) {
-    const dreams = profile.dreams.filter((_, j) => j !== i);
+  function markDone(i: number) {
+    const dreams = profile.dreams.map((d, j) =>
+      j === i ? { ...d, done: true } : d,
+    );
     saveProfile({ ...profile, dreams });
+    setGoalOpen(false);
+    showMoment(t("celebrated"));
+  }
+
+  function removeGoal(i: number) {
+    saveProfile({ ...profile, dreams: profile.dreams.filter((_, j) => j !== i) });
     setGoalErr("");
+  }
+
+  function changeLife() {
+    const n = Number(lifeEdit);
+    if (!Number.isFinite(n) || n <= 0 || n > 130) return setGoalErr(t("errLifeRange"));
+    if (n <= currentAge()) return setGoalErr(t("errLifePassed"));
+    saveProfile({ ...profile, lifeYears: n });
+    setLifeEdit("");
+    setGoalErr("");
+  }
+
+  /* バックアップ・共有 */
+  function downloadText(name: string, text: string, type: string) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type }));
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function doExport() {
+    downloadText(
+      `muhaku-${localDayKey(new Date())}.json`,
+      exportProfile(),
+      "application/json",
+    );
+  }
+
+  function doImport(file: File) {
+    file.text().then((txt) => {
+      const p = importProfile(txt);
+      setPastMsg(p ? t("importOk") : t("importErr"));
+    });
+  }
+
+  function saveView() {
+    const src =
+      glCanvasRef.current && glCanvasRef.current.style.display !== "none"
+        ? glCanvasRef.current
+        : canvasRef.current;
+    if (!src) return;
+    const c = document.createElement("canvas");
+    c.width = src.width;
+    c.height = src.height;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(src, 0, 0);
+    const s = src.width / window.innerWidth;
+    ctx.fillStyle = pal.text;
+    ctx.font = `${16 * s}px ui-monospace, Menlo, monospace`;
+    ctx.fillText(
+      `${t("remainPre")} ${pctMain}${pctTail} %`,
+      window.innerWidth * 0.055 * s,
+      window.innerHeight * 0.9 * s,
+    );
+    ctx.fillStyle = pal.textDim;
+    ctx.font = `${11 * s}px ui-monospace, Menlo, monospace`;
+    ctx.fillText(
+      t("ctxLife", { days }),
+      window.innerWidth * 0.055 * s,
+      window.innerHeight * 0.93 * s,
+    );
+    const a = document.createElement("a");
+    a.href = c.toDataURL("image/png");
+    a.download = `muhaku-${localDayKey(new Date())}.png`;
+    a.click();
   }
 
   const vars = useMemo(
@@ -375,28 +569,36 @@ export default function MainScene({
   const level = zoomLevel(zoomZ);
   const contextLine =
     level === "life"
-      ? `残り ${days} 日`
+      ? t("ctxLife", { days })
       : level === "year"
-        ? `今年の残りは、あと ${yearDays} 日`
+        ? t("ctxYear", { days: yearDays })
         : level === "day"
-          ? `今日の残りは、あと ${todayLeft}`
-          : "この一秒も、こぼれている。";
+          ? t("ctxDay", { t: todayLeft })
+          : t("ctxSec");
   const railT = Math.min(
     1,
     Math.max(0, Math.log(zoomZ / ZOOM_MIN) / Math.log(ZOOM_MAX / ZOOM_MIN)),
   );
   const railTop = 92 - railT * 84;
+  const RAIL: { key: StrKey; top: number; level: ZoomLevel }[] = [
+    { key: "railSec", top: 8, level: "sec" },
+    { key: "railDay", top: 36, level: "day" },
+    { key: "railYear", top: 64, level: "year" },
+    { key: "railLife", top: 92, level: "life" },
+  ];
 
   /* 夢ラベル: ズームに追従し、重なりは上下に散らし、リーダー線でリングと結ぶ */
-  type PlacedDream = {
-    label: string;
-    days: string;
-    ringY: number; /* リングの実スクリーンy */
-    labelY: number; /* 重なり解消後のラベルy */
-    ringLeftX: number;
-  };
-  const placedDreams: PlacedDream[] = (() => {
-    if (zoomZ >= 2.6 || typeof window === "undefined") return [];
+  const placedDreams = (() => {
+    if (zoomZ >= 2.6 || typeof window === "undefined") {
+      return [] as {
+        label: string;
+        days: string;
+        done: boolean;
+        ringY: number;
+        labelY: number;
+        ringLeftX: number;
+      }[];
+    }
     const hWin = window.innerHeight;
     const wWin = window.innerWidth;
     if (hWin <= 0) return [];
@@ -409,6 +611,7 @@ export default function MainScene({
         return {
           label: m.label,
           days: m.days,
+          done: m.done,
           ringY,
           labelY: ringY,
           ringLeftX: wWin / 2 - m.hc * zoomZ,
@@ -416,7 +619,6 @@ export default function MainScene({
       })
       .filter((m) => m.ringY > hWin * 0.05 && m.ringY < hWin * 0.9)
       .sort((a, b) => a.ringY - b.ringY);
-    /* 最小間隔で押し広げる */
     const GAP = 26;
     for (let i = 1; i < items.length; i++) {
       if (items[i].labelY < items[i - 1].labelY + GAP) {
@@ -440,19 +642,32 @@ export default function MainScene({
       ? window.innerWidth * 0.04 + Math.min(window.innerWidth * 0.26, 300)
       : 0;
 
+  const hints: StrKey[] = ["hintZoom", "hintBand", "hintSound"];
+
+  function openPast() {
+    setElapsedDays(
+      Math.max(0, Math.floor((Date.now() - birthMs(profile)) / DAY_MS)),
+    );
+    setPastOpen(true);
+  }
+
   return (
     <div className="stage" style={vars}>
       <canvas ref={canvasRef} className="stage-canvas" aria-hidden="true" />
       <canvas ref={glCanvasRef} className="stage-canvas" aria-hidden="true" />
+      <p className="sr-only" role="status">
+        {ariaText}
+      </p>
 
       <div
-        className={`stage-ui ${(idle && !goalOpen) || cinematic ? "is-idle" : ""}`}
+        className={`stage-ui ${(idle && !goalOpen && !pastOpen) || cinematic ? "is-idle" : ""}`}
       >
+        <LangToggle />
         <span className="ui-nokori" aria-hidden="true">
-          のこり
+          {t("nokori")}
         </span>
         <div className="ui-counter">
-          <span className="ui-counter-pre">残り</span>
+          <span className="ui-counter-pre">{t("remainPre")}</span>
           <span className="ui-counter-main">{pctMain}</span>
           <span className="ui-counter-tail">{pctTail}</span>
           <span className="ui-counter-pct">%</span>
@@ -466,13 +681,17 @@ export default function MainScene({
               style={{ top: `${r.top}%` }}
               className={level === r.level ? "on" : ""}
             >
-              {r.label}
+              {t(r.key)}
             </b>
           ))}
           <i style={{ top: `${railTop}%` }} />
         </div>
 
-        {!hintGone && <p className="ui-zoomhint">スクロールで、時間に近づく</p>}
+        {!hintGone && (
+          <p className="ui-zoomhint" key={hintIdx % 3}>
+            {t(hints[hintIdx % 3])}
+          </p>
+        )}
 
         {placedDreams.map((m, i) => {
           const x1 = labelRightX + 8;
@@ -483,9 +702,14 @@ export default function MainScene({
           const ang = Math.atan2(dy, dx);
           return (
             <div key={`${m.label}-${i}`}>
-              <div className="ui-dream" style={{ top: m.labelY - 9 }}>
+              <div
+                className={`ui-dream ${m.done ? "is-done" : ""}`}
+                style={{ top: m.labelY - 9 }}
+              >
                 <span className="ui-dream-label">{m.label}</span>
-                <span className="ui-dream-days">あと {m.days} 日</span>
+                <span className="ui-dream-days">
+                  {m.done ? t("dreamDone") : t("dreamLeft", { days: m.days })}
+                </span>
               </div>
               {dx > 12 && (
                 <div
@@ -495,6 +719,7 @@ export default function MainScene({
                     top: m.labelY,
                     width: len,
                     transform: `rotate(${ang}rad)`,
+                    opacity: m.done ? 0.18 : undefined,
                   }}
                 />
               )}
@@ -502,50 +727,40 @@ export default function MainScene({
           );
         })}
 
-        <div className="ui-goal">
-          <button onClick={() => setGoalOpen(true)}>目標を足す</button>
-        </div>
-
-        <div className="ui-sound">
-          <button onClick={toggleMute}>{muted ? "音を出す" : "音を消す"}</button>
-        </div>
-
-        <div className="ui-reset">
+        <div className="ui-stack">
+          <button onClick={openPast}>{t("btnPast")}</button>
+          <button onClick={() => setGoalOpen(true)}>{t("btnGoal")}</button>
+          <button onClick={toggleMute}>{muted ? t("btnUnmute") : t("btnMute")}</button>
           {confirming ? (
             <span className="ui-reset-confirm">
-              すべて消して、最初から?
-              <button onClick={onReset}>はい</button>
-              <button onClick={() => setConfirming(false)}>いいえ</button>
+              {t("resetConfirm")}
+              <button onClick={onReset}>{t("yes")}</button>
+              <button onClick={() => setConfirming(false)}>{t("no")}</button>
             </span>
           ) : (
-            <button
-              className="ui-reset-btn"
-              onClick={() => setConfirming(true)}
-              aria-label="設定をやり直す"
-            >
-              はじめから
-            </button>
+            <button onClick={() => setConfirming(true)}>{t("btnReset")}</button>
           )}
         </div>
       </div>
 
       {goalOpen && (
-        <div className="goal-dialog" role="dialog" aria-label="目標を足す">
+        <div className="goal-dialog" role="dialog" aria-label={t("btnGoal")}>
           <div className="goal-card">
-            <p className="goal-q">終わるまでに、何をしますか。</p>
-            <p className="goal-s">
-              歳を決めて、残りの中に沈めます。砂面がその深さに届いた日が、その歳です。
-            </p>
+            <p className="goal-q">{t("goalQ")}</p>
+            <p className="goal-s">{t("goalS")}</p>
             {profile.dreams.length > 0 && (
               <ul className="goal-list">
                 {profile.dreams.map((d, i) => (
-                  <li key={`${d.label}-${d.age}-${i}`}>
+                  <li key={`${d.label}-${d.age}-${i}`} className={d.done ? "is-done" : ""}>
                     <span>
-                      {d.label} — {d.age}歳
+                      {d.label} — {d.age}
                     </span>
-                    <button onClick={() => removeGoal(i)} aria-label="この目標を消す">
-                      消す
-                    </button>
+                    <span className="goal-list-actions">
+                      {!d.done && (
+                        <button onClick={() => markDone(i)}>{t("goalDone")}</button>
+                      )}
+                      <button onClick={() => removeGoal(i)}>{t("goalRemove")}</button>
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -554,9 +769,9 @@ export default function MainScene({
               type="text"
               className="ritual-in"
               value={goalLabel}
-              placeholder="例: 富士山に登る"
+              placeholder={t("goalPh")}
               onChange={(e) => setGoalLabel(e.target.value)}
-              aria-label="目標"
+              aria-label={t("goalQ")}
             />
             <div className="ritual-agewrap">
               <input
@@ -566,26 +781,110 @@ export default function MainScene({
                 value={goalAge}
                 placeholder="40"
                 onChange={(e) => setGoalAge(e.target.value)}
-                aria-label="何歳までに"
+                aria-label={t("obAgeSuffix")}
               />
-              <span className="ritual-agelabel">歳までに</span>
+              <span className="ritual-agelabel">{t("obAgeSuffix")}</span>
+            </div>
+            <div className="goal-life">
+              <span className="ritual-agelabel">{t("lifeEditLabel")}</span>
+              <input
+                type="number"
+                inputMode="numeric"
+                className="ritual-in ritual-in-num"
+                value={lifeEdit}
+                placeholder={String(profile.lifeYears)}
+                onChange={(e) => setLifeEdit(e.target.value)}
+                aria-label={t("lifeEditLabel")}
+              />
+              <button className="ritual-skip" onClick={changeLife}>
+                {t("lifeEditBtn")}
+              </button>
             </div>
             {goalErr && <p className="ritual-err">{goalErr}</p>}
             <div className="goal-actions">
               <button className="ritual-btn" onClick={addGoal}>
-                沈める
+                {t("goalAdd")}
               </button>
               <button className="ritual-skip" onClick={() => setGoalOpen(false)}>
-                とじる
+                {t("goalClose")}
               </button>
             </div>
           </div>
         </div>
       )}
 
+      {pastOpen && (
+        <div className="goal-dialog" role="dialog" aria-label={t("pastTitle")}>
+          <div className="goal-card">
+            <p className="goal-q">{t("pastTitle")}</p>
+            <p className="goal-s">{t("pastSub")}</p>
+            <dl className="past-stats">
+              <div>
+                <dt>{t("pastDays")}</dt>
+                <dd>{nf(elapsedDays)}</dd>
+              </div>
+              <div>
+                <dt>{t("pastMornings")}</dt>
+                <dd>{nf(elapsedDays)}</dd>
+              </div>
+              <div>
+                <dt>{t("pastSprings")}</dt>
+                <dd>{nf(Math.floor(elapsedDays / 365.2425))}</dd>
+              </div>
+              <div>
+                <dt>{t("pastMoons")}</dt>
+                <dd>{nf(Math.floor(elapsedDays / 29.53))}</dd>
+              </div>
+            </dl>
+            {pastMsg && <p className="ritual-err">{pastMsg}</p>}
+            <div className="goal-actions">
+              <button className="ritual-btn" onClick={saveView}>
+                {t("pastShare")}
+              </button>
+              <div className="past-datarow">
+                <button className="ritual-skip" onClick={doExport}>
+                  {t("pastExport")}
+                </button>
+                <button
+                  className="ritual-skip"
+                  onClick={() => importRef.current?.click()}
+                >
+                  {t("pastImport")}
+                </button>
+              </div>
+              <button
+                className="ritual-skip"
+                onClick={() => {
+                  setPastOpen(false);
+                  setPastMsg("");
+                }}
+              >
+                {t("goalClose")}
+              </button>
+            </div>
+            <input
+              ref={importRef}
+              type="file"
+              accept="application/json"
+              className="sr-only"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) doImport(f);
+                e.target.value = "";
+              }}
+            />
+          </div>
+        </div>
+      )}
+
       {revealVisible && (
         <div className="reveal" aria-live="polite">
-          <p>これが、あなたの残りです。——いまも、一粒。</p>
+          <p>{t("reveal")}</p>
+        </div>
+      )}
+      {moment && (
+        <div className="reveal" aria-live="polite">
+          <p>{moment}</p>
         </div>
       )}
     </div>

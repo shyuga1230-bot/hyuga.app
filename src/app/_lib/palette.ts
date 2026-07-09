@@ -24,28 +24,28 @@ export const MONO: Record<Band, Palette> = {
     bgTop: "#EFEFED", bgBottom: "#E3E3E0", glow: "#FFFFFF",
     floorTop: "#DCDCD8", floorBottom: "#D0D0CC",
     sandHi: "#55554F", sandLo: "#2C2C29",
-    accent: "#A8834C", text: "#2B2B29", textDim: "#757570",
+    accent: "#A8834C", text: "#2B2B29", textDim: "#63635E",
   },
   day: {
     dark: false,
     bgTop: "#F7F7F5", bgBottom: "#ECECE9", glow: "#FFFFFF",
     floorTop: "#E2E2DE", floorBottom: "#D6D6D2",
     sandHi: "#504F4A", sandLo: "#262623",
-    accent: "#A8834C", text: "#262624", textDim: "#71716C",
+    accent: "#A8834C", text: "#262624", textDim: "#5F5F5A",
   },
   dusk: {
     dark: true,
     bgTop: "#1B1B1A", bgBottom: "#101010", glow: "#FFFFFF",
     floorTop: "#0C0C0B", floorBottom: "#080808",
     sandHi: "#E9E9E4", sandLo: "#B9B9B2",
-    accent: "#D8A868", text: "#E9E9E4", textDim: "#8C8C86",
+    accent: "#D8A868", text: "#E9E9E4", textDim: "#A0A09A",
   },
   night: {
     dark: true,
     bgTop: "#131312", bgBottom: "#0A0A0A", glow: "#F4F4EF",
     floorTop: "#070707", floorBottom: "#050505",
     sandHi: "#F2F2EC", sandLo: "#C0C0B8",
-    accent: "#E7B36B", text: "#EFEFEA", textDim: "#8F8F89",
+    accent: "#E7B36B", text: "#EFEFEA", textDim: "#A3A39D",
   },
 };
 
