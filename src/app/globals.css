@@ -1,26 +1,386 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --mincho: "Hiragino Mincho ProN", "Hiragino Mincho Pro", "Yu Mincho",
+    "YuMincho", "Noto Serif CJK JP", "Noto Serif JP", serif;
+  --gothic: "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  margin: 0;
+  background: #0b0b0a;
+  color: #edede8;
+  font-family: var(--gothic);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.boot {
+  position: fixed;
+  inset: 0;
+  background: #0b0b0a;
+}
+
+/* ---------- 儀式(オンボーディング) ---------- */
+
+.ritual {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse 90% 70% at 50% 32%, #141412, #0b0b0a);
+  padding: 24px;
+}
+
+.ritual-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 26px;
+  text-align: center;
+  max-width: 560px;
+  animation: ritual-in 1.6s ease both;
+}
+
+@keyframes ritual-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.ritual-q {
+  font-family: var(--mincho);
+  font-weight: 300;
+  font-size: clamp(18px, 3vw, 24px);
+  letter-spacing: 0.24em;
+  line-height: 2.2;
+  color: #ece7d9;
+  margin: 0;
+  text-wrap: balance;
+}
+
+.ritual-s {
+  font-size: 12px;
+  line-height: 2.2;
+  letter-spacing: 0.06em;
+  color: #8f8b7f;
+  margin: 0;
+}
+
+.ritual-in {
+  font-family: var(--mono);
+  font-size: 15px;
+  letter-spacing: 0.14em;
+  text-align: center;
+  color: #ece7d9;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #3d3a33;
+  padding: 8px 18px;
+  outline: none;
+  color-scheme: dark;
+  min-width: 220px;
+}
+
+.ritual-in:focus-visible {
+  border-bottom-color: #a8834c;
+}
+
+.ritual-in-num {
+  min-width: 120px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ritual-agewrap {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.ritual-agelabel {
+  font-size: 12px;
+  color: #8f8b7f;
+  letter-spacing: 0.2em;
+}
+
+.ritual-err {
+  font-family: var(--mincho);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  color: #c98f4e;
+  margin: 0;
+}
+
+.ritual-btn {
+  font-family: var(--mincho);
+  font-size: 13px;
+  letter-spacing: 0.5em;
+  text-indent: 0.5em;
+  color: #ece7d9;
+  background: transparent;
+  border: 1px solid #3d3a33;
+  border-radius: 999px;
+  padding: 12px 40px;
+  cursor: pointer;
+  transition: border-color 0.6s ease, color 0.6s ease;
+}
+
+.ritual-btn:hover,
+.ritual-btn:focus-visible {
+  border-color: #a8834c;
+  outline: none;
+}
+
+.ritual-skip {
+  font-size: 11px;
+  letter-spacing: 0.24em;
+  color: #6e6a60;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.ritual-skip:hover,
+.ritual-skip:focus-visible {
+  color: #a8834c;
+  outline: none;
+}
+
+/* ---------- メイン画面 ---------- */
+
+.stage {
+  position: fixed;
+  inset: 0;
+}
+
+.stage-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.stage-ui {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transition: opacity 2.4s ease;
+}
+
+.stage-ui.is-idle {
+  opacity: 0;
+}
+
+.ui-nokori {
+  position: absolute;
+  left: 5.8%;
+  bottom: 22%;
+  writing-mode: vertical-rl;
+  font-family: var(--mincho);
+  font-size: 11px;
+  letter-spacing: 0.5em;
+  color: var(--f-dim);
+}
+
+.ui-counter {
+  position: absolute;
+  left: 5.5%;
+  bottom: 11%;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--f-text);
+}
+
+.ui-counter-pre {
+  font-family: var(--mincho);
+  font-size: 13px;
+  letter-spacing: 0.2em;
+  margin-right: 0.6em;
+  color: var(--f-dim);
+}
+
+.ui-counter-main {
+  font-size: clamp(16px, 2vw, 22px);
+}
+
+.ui-counter-tail {
+  font-size: 0.72em;
+  color: var(--f-dim);
+}
+
+.ui-counter-pct {
+  font-family: var(--mincho);
+  font-size: 12px;
+  margin-left: 0.4em;
+  color: var(--f-dim);
+}
+
+.ui-days {
+  position: absolute;
+  left: 5.7%;
+  bottom: 7%;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--f-dim);
+  margin: 0;
+}
+
+.ui-rail {
+  position: absolute;
+  right: 4.5%;
+  top: 12%;
+  bottom: 12%;
+  width: 1px;
+  background: var(--f-dim);
+  opacity: 0.3;
+}
+
+.ui-rail b {
+  position: absolute;
+  left: -16px;
+  top: 2%;
+  writing-mode: vertical-rl;
+  font-family: var(--mincho);
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--f-dim);
+}
+
+.ui-rail i {
+  position: absolute;
+  left: -2px;
+  top: 8%;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--f-text);
+}
+
+.ui-dream {
+  position: absolute;
+  left: 4%;
+  width: min(26%, 300px);
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ui-dream-label {
+  font-family: var(--mincho);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  color: var(--f-acc);
+}
+
+.ui-dream-days {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--f-dim);
+}
+
+.ui-reset {
+  position: absolute;
+  right: 4%;
+  bottom: 5.5%;
+  pointer-events: auto;
+}
+
+.ui-reset-btn {
+  font-size: 10px;
+  letter-spacing: 0.26em;
+  color: var(--f-dim);
+  opacity: 0.5;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+  transition: opacity 0.4s ease;
+}
+
+.ui-reset-btn:hover,
+.ui-reset-btn:focus-visible {
+  opacity: 1;
+  outline: none;
+}
+
+.ui-reset-confirm {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--f-dim);
+  display: inline-flex;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.ui-reset-confirm button {
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  color: var(--f-text);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--f-dim);
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+/* ---------- 初回のリビール ---------- */
+
+.reveal {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.reveal p {
+  font-family: var(--mincho);
+  font-weight: 300;
+  font-size: clamp(15px, 2.4vw, 21px);
+  letter-spacing: 0.3em;
+  color: var(--f-text, #ece7d9);
+  text-shadow: 0 0 24px rgba(0, 0, 0, 0.4);
+  margin: 0;
+  padding: 0 24px;
+  text-align: center;
+  animation: reveal-fade 4.5s ease both;
+}
+
+@keyframes reveal-fade {
+  0% {
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01s !important;
+    transition-duration: 0.01s !important;
+  }
 }
