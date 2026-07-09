@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createGlSand } from "../_lib/glsand";
+import { createGlSand, type GlSandHandle } from "../_lib/glsand";
 import { bandForDate, MONO, type Band } from "../_lib/palette";
 import { createScene, sphereGeom } from "../_lib/scene";
 import type { Profile } from "../_lib/store";
 import {
+  DAY_MS,
   dreamFrac,
   dreamRemainDays,
   nf,
@@ -15,6 +16,24 @@ import {
 } from "../_lib/time";
 
 const IDLE_MS = 45_000;
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 8;
+
+type ZoomLevel = "life" | "year" | "day" | "sec";
+
+function zoomLevel(z: number): ZoomLevel {
+  if (z >= 5.5) return "sec";
+  if (z >= 2.8) return "day";
+  if (z >= 1.2) return "year";
+  return "life";
+}
+
+const RAIL = [
+  { label: "秒", top: 8, level: "sec" as ZoomLevel },
+  { label: "日", top: 36, level: "day" as ZoomLevel },
+  { label: "年", top: 64, level: "year" as ZoomLevel },
+  { label: "生", top: 92, level: "life" as ZoomLevel },
+];
 
 export default function MainScene({
   profile,
@@ -36,11 +55,17 @@ export default function MainScene({
   const [pctMain, setPctMain] = useState("--.-");
   const [pctTail, setPctTail] = useState("------");
   const [days, setDays] = useState("--,---");
+  const [yearDays, setYearDays] = useState("---");
+  const [todayLeft, setTodayLeft] = useState("--時間--分--秒");
   const [dreamDays, setDreamDays] = useState("-,---");
   const [dreamY, setDreamY] = useState<number | null>(null);
   const [idle, setIdle] = useState(false);
   const [revealVisible, setRevealVisible] = useState(reveal);
   const [confirming, setConfirming] = useState(false);
+  const [zoomZ, setZoomZ] = useState(1);
+  const [hintGone, setHintGone] = useState(false);
+  const zoomTargetRef = useRef(1);
+  const glHandleRef = useRef<GlSandHandle | null>(null);
 
   const dream = profile.dreams[0] ?? null;
   const pal = MONO[band];
@@ -63,11 +88,16 @@ export default function MainScene({
           getRemainFrac: () => remainFrac(profileRef.current),
           getDreamFrac: getDream,
           getBand: () => bandForDate(new Date()),
+          getZoomTarget: () => zoomTargetRef.current,
         });
       } catch {
         glSand = null; // WebGL2 が無ければ Canvas 2D にフォールバック
       }
     }
+    glHandleRef.current = glSand;
+    const zoomPoll = setInterval(() => {
+      if (glHandleRef.current) setZoomZ(glHandleRef.current.getZoom());
+    }, 150);
 
     /* GL が使えるときはシーン全体を GL が描く。2D はフォールバック専用 */
     canvas.style.display = glSand ? "none" : "";
@@ -84,8 +114,56 @@ export default function MainScene({
       });
     }
     return () => {
+      clearInterval(zoomPoll);
+      glHandleRef.current = null;
       scene?.destroy();
       glSand?.destroy();
+    };
+  }, []);
+
+  /* 連続ズーム: ホイールとピンチ */
+  useEffect(() => {
+    const bump = (factor: number) => {
+      zoomTargetRef.current = Math.min(
+        ZOOM_MAX,
+        Math.max(ZOOM_MIN, zoomTargetRef.current * factor),
+      );
+      setHintGone(true);
+    };
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      bump(Math.exp(-e.deltaY * 0.0014));
+    };
+    const pts = new Map<number, { x: number; y: number }>();
+    let lastDist = 0;
+    const onDown = (e: PointerEvent) => {
+      if (e.pointerType === "touch") pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        if (lastDist > 0) bump(dist / lastDist);
+        lastDist = dist;
+      }
+    };
+    const onUp = (e: PointerEvent) => {
+      pts.delete(e.pointerId);
+      lastDist = 0;
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("pointerdown", onDown);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
   }, []);
 
@@ -102,6 +180,18 @@ export default function MainScene({
       const d = profileRef.current.dreams[0];
       if (d) setDreamDays(nf(dreamRemainDays(profileRef.current, d)));
       setBand(bandForDate(new Date()));
+      const now = new Date();
+      const endOfYear = new Date(now.getFullYear() + 1, 0, 1).getTime();
+      setYearDays(nf(Math.ceil((endOfYear - now.getTime()) / DAY_MS)));
+      const midnight = new Date(now);
+      midnight.setHours(24, 0, 0, 0);
+      const ms = midnight.getTime() - now.getTime();
+      const hh = Math.floor(ms / 3_600_000);
+      const mm = Math.floor(ms / 60_000) % 60;
+      const ss = Math.floor(ms / 1000) % 60;
+      setTodayLeft(
+        `${hh}時間${String(mm).padStart(2, "0")}分${String(ss).padStart(2, "0")}秒`,
+      );
     }, 1000);
     return () => {
       clearInterval(fast);
@@ -171,6 +261,34 @@ export default function MainScene({
     [pal],
   );
 
+  const level = zoomLevel(zoomZ);
+  const contextLine =
+    level === "life"
+      ? `残り ${days} 日`
+      : level === "year"
+        ? `今年の残りは、あと ${yearDays} 日`
+        : level === "day"
+          ? `今日の残りは、あと ${todayLeft}`
+          : "この一秒も、こぼれている。";
+  const railT = Math.min(
+    1,
+    Math.max(0, Math.log(zoomZ / ZOOM_MIN) / Math.log(ZOOM_MAX / ZOOM_MIN)),
+  );
+  const railTop = 92 - railT * 84;
+
+  /* 夢ラベルはズームに追従し、大きく寄ったら静かに消える */
+  let dreamTop: number | null = null;
+  if (dream && dreamY !== null && zoomZ < 2.6) {
+    const hWin = typeof window !== "undefined" ? window.innerHeight : 0;
+    if (hWin > 0) {
+      const g = sphereGeom(window.innerWidth, hWin);
+      const k = Math.min(1, Math.max(0, (zoomZ - 1) / 3));
+      const fy = hWin * 0.5 + (g.botY + hWin * 0.04 - hWin * 0.5) * k;
+      const t = fy + (dreamY - fy) * zoomZ;
+      if (t > hWin * 0.05 && t < hWin * 0.9) dreamTop = t;
+    }
+  }
+
   return (
     <div className="stage" style={vars}>
       <canvas ref={canvasRef} className="stage-canvas" aria-hidden="true" />
@@ -186,15 +304,25 @@ export default function MainScene({
           <span className="ui-counter-tail">{pctTail}</span>
           <span className="ui-counter-pct">%</span>
         </div>
-        <p className="ui-days">残り {days} 日</p>
+        <p className="ui-days">{contextLine}</p>
 
         <div className="ui-rail" aria-hidden="true">
-          <b>秒</b>
-          <i />
+          {RAIL.map((r) => (
+            <b
+              key={r.level}
+              style={{ top: `${r.top}%` }}
+              className={level === r.level ? "on" : ""}
+            >
+              {r.label}
+            </b>
+          ))}
+          <i style={{ top: `${railTop}%` }} />
         </div>
 
-        {dream && dreamY !== null && (
-          <div className="ui-dream" style={{ top: dreamY - 10 }}>
+        {!hintGone && <p className="ui-zoomhint">スクロールで、時間に近づく</p>}
+
+        {dream && dreamTop !== null && (
+          <div className="ui-dream" style={{ top: dreamTop - 10 }}>
             <span className="ui-dream-label">{dream.label}</span>
             <span className="ui-dream-days">この深さまで、あと {dreamDays} 日</span>
           </div>

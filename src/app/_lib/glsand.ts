@@ -16,10 +16,14 @@ export type GlSandOpts = {
   getRemainFrac: () => number;
   getDreamFrac: () => number | null;
   getBand: () => Band;
+  /** 連続ズームの目標倍率(0.5〜8)。省略時は 1 */
+  getZoomTarget?: () => number;
 };
 
 export type GlSandHandle = {
   destroy: () => void;
+  /** なめらかに追従中の現在ズーム値 */
+  getZoom: () => number;
 };
 
 const MAX_SPILL = 9000;
@@ -54,6 +58,8 @@ uniform vec3 u_floorB;
 uniform vec3 u_sandHi;
 uniform vec3 u_sandLo;
 uniform vec3 u_accent;
+uniform float u_zoom;
+uniform vec2 u_focus;
 out vec4 outColor;
 
 float hash12(vec2 p) {
@@ -200,6 +206,8 @@ vec3 shadePressed(vec3 P1) {
 void main() {
   vec2 px = v_uv * u_res;
   px.y = u_res.y - px.y; /* y を下向きに */
+  vec2 spx = px;         /* スクリーン座標(ビネット用) */
+  px = u_focus + (px - u_focus) / u_zoom; /* 連続ズーム */
   vec2 c = sphC();
   float R = sphR();
 
@@ -290,8 +298,8 @@ void main() {
     }
   }
 
-  /* ごく淡いビネット */
-  vec2 vd = (px - vec2(u_res.x * 0.5, u_res.y * 0.46)) / (u_res.y * 0.95);
+  /* ごく淡いビネット(スクリーン空間) */
+  vec2 vd = (spx - vec2(u_res.x * 0.5, u_res.y * 0.46)) / (u_res.y * 0.95);
   float vig = smoothstep(0.32, 1.0, length(vd));
   col *= 1.0 - vig * (u_dark > 0.5 ? 0.35 : 0.12);
 
@@ -306,12 +314,15 @@ layout(location=2) in float a_alpha;
 layout(location=3) in float a_tint;
 uniform vec2 u_res;
 uniform float u_sizeScale;
+uniform float u_zoom;
+uniform vec2 u_focus;
 out float v_alpha;
 out float v_tint;
 void main() {
-  vec2 clip = (a_pos / u_res * 2.0 - 1.0) * vec2(1.0, -1.0);
+  vec2 pos = u_focus + (a_pos - u_focus) * u_zoom;
+  vec2 clip = (pos / u_res * 2.0 - 1.0) * vec2(1.0, -1.0);
   gl_Position = vec4(clip, 0.0, 1.0);
-  gl_PointSize = a_size * u_sizeScale;
+  gl_PointSize = a_size * u_sizeScale * u_zoom;
   v_alpha = a_alpha;
   v_tint = a_tint;
 }`;
@@ -401,6 +412,8 @@ uniform vec2 u_res;
 uniform float u_scale;
 uniform float u_fadeStart;
 uniform float u_fadeEnd;
+uniform float u_zoom;
+uniform vec2 u_focus;
 out float v_alpha;
 out float v_tint;
 float hash1(float n) { return fract(sin(n) * 43758.5453123); }
@@ -408,12 +421,13 @@ void main() {
   vec2 pos = a_posVel.xy;
   float life = a_meta.x;
   float seed = a_meta.y;
+  float fade = pos.y < u_fadeStart ? 1.0 : max(0.0, 1.0 - (pos.y - u_fadeStart) / (u_fadeEnd - u_fadeStart));
+  pos = u_focus + (pos - u_focus) * u_zoom;
   vec2 clip = (pos / u_res * 2.0 - 1.0) * vec2(1.0, -1.0);
   gl_Position = vec4(clip, 0.0, 1.0);
-  float fade = pos.y < u_fadeStart ? 1.0 : max(0.0, 1.0 - (pos.y - u_fadeStart) / (u_fadeEnd - u_fadeStart));
   v_alpha = life > 0.5 ? fade * 0.30 : 0.0;
   v_tint = hash1(seed * 17.31);
-  gl_PointSize = (1.6 + hash1(seed * 7.7) * 3.2) * u_scale * (life > 0.5 ? 1.0 : 0.0);
+  gl_PointSize = (1.6 + hash1(seed * 7.7) * 3.2) * u_scale * u_zoom * (life > 0.5 ? 1.0 : 0.0);
 }`;
 
 const BRIGHT_FRAG = `#version 300 es
@@ -602,10 +616,12 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     floorT: U(sceneProg, "u_floorT"), floorB: U(sceneProg, "u_floorB"),
     sandHi: U(sceneProg, "u_sandHi"), sandLo: U(sceneProg, "u_sandLo"),
     accent: U(sceneProg, "u_accent"),
+    zoom: U(sceneProg, "u_zoom"), focus: U(sceneProg, "u_focus"),
   };
   const pointU = {
     res: U(pointProg, "u_res"), sizeScale: U(pointProg, "u_sizeScale"),
     hi: U(pointProg, "u_hi"), lo: U(pointProg, "u_lo"), dark: U(pointProg, "u_dark"),
+    zoom: U(pointProg, "u_zoom"), focus: U(pointProg, "u_focus"),
   };
   const brightU = { tex: U(brightProg, "u_tex"), threshold: U(brightProg, "u_threshold") };
   const blurU = { tex: U(blurProg, "u_tex"), dir: U(blurProg, "u_dir") };
@@ -630,6 +646,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   let tfObj: WebGLTransformFeedback | null = null;
   let cur = 0;
   let simDt = 0.016;
+  let zCur = 1;
   let simU: {
     dt: WebGLUniformLocation | null; time: WebGLUniformLocation | null;
     emit: WebGLUniformLocation | null; cut: WebGLUniformLocation | null;
@@ -640,6 +657,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     fadeStart: WebGLUniformLocation | null; fadeEnd: WebGLUniformLocation | null;
     hi: WebGLUniformLocation | null; lo: WebGLUniformLocation | null;
     dark: WebGLUniformLocation | null;
+    zoom: WebGLUniformLocation | null; focus: WebGLUniformLocation | null;
   } | null = null;
   try {
     simProg = linkTF(gl, SIM_VERT, SIM_FRAG, ["v_posVel", "v_meta"]);
@@ -680,6 +698,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
       res: U(spillProg, "u_res"), scale: U(spillProg, "u_scale"),
       fadeStart: U(spillProg, "u_fadeStart"), fadeEnd: U(spillProg, "u_fadeEnd"),
       hi: U(spillProg, "u_hi"), lo: U(spillProg, "u_lo"), dark: U(spillProg, "u_dark"),
+      zoom: U(spillProg, "u_zoom"), focus: U(spillProg, "u_focus"),
     };
     gpuOK = true;
   } catch {
@@ -914,6 +933,14 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     const lo = hexVec(pal.sandLo);
     const dreamF = opts.getDreamFrac();
 
+    /* 連続ズーム: 目標へなめらかに追従。寄るほど焦点が排出口へ移る */
+    const zt = Math.min(8, Math.max(0.5, opts.getZoomTarget ? opts.getZoomTarget() : 1));
+    zCur += (zt - zCur) * Math.min(1, simDt * 6);
+    const gz = sphereGeom(w, h);
+    const k = Math.min(1, Math.max(0, (zCur - 1) / 3));
+    const fx = gz.cx * dpr;
+    const fy = (h * 0.5 + (gz.botY + h * 0.04 - h * 0.5) * k) * dpr;
+
     /* 1) シーンをフル解像度FBOへレイトレース */
     gl.bindFramebuffer(gl.FRAMEBUFFER, sceneT.fbo);
     gl.viewport(0, 0, canvas.width, canvas.height);
@@ -936,6 +963,8 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     setv(sceneU.sandHi, pal.sandHi);
     setv(sceneU.sandLo, pal.sandLo);
     setv(sceneU.accent, pal.accent);
+    gl.uniform1f(sceneU.zoom, zCur);
+    gl.uniform2f(sceneU.focus, fx, fy);
     quadPass(sceneProg);
 
     /* 2a) GPUパーティクル: Transform Feedback で約5万粒をGPU上で更新 */
@@ -970,6 +999,8 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
       gl.uniform3f(spillU.hi, hi[0], hi[1], hi[2]);
       gl.uniform3f(spillU.lo, lo[0], lo[1], lo[2]);
       gl.uniform1f(spillU.dark, dark ? 1 : 0);
+      gl.uniform1f(spillU.zoom, zCur);
+      gl.uniform2f(spillU.focus, fx, fy);
       gl.bindVertexArray(vaoSim[cur]);
       gl.drawArrays(gl.POINTS, 0, SPILL_N);
       gl.bindVertexArray(null);
@@ -988,6 +1019,8 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     gl.uniform3f(pointU.hi, hi[0], hi[1], hi[2]);
     gl.uniform3f(pointU.lo, lo[0], lo[1], lo[2]);
     gl.uniform1f(pointU.dark, dark ? 1 : 0);
+    gl.uniform1f(pointU.zoom, zCur);
+    gl.uniform2f(pointU.focus, fx, fy);
     gl.bindVertexArray(vao);
     gl.drawArrays(gl.POINTS, 0, count);
     gl.bindVertexArray(null);
@@ -1106,8 +1139,8 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     gl.uniform1f(finalU.exposure, dark ? 1.1 : 1.0);
     gl.uniform1f(finalU.time, timeS);
     gl.uniform2f(finalU.res, canvas.width, canvas.height);
-    gl.uniform1f(finalU.cy, g.cy * dpr);
-    gl.uniform1f(finalU.R, g.R * dpr);
+    gl.uniform1f(finalU.cy, fy + (g.cy * dpr - fy) * zCur);
+    gl.uniform1f(finalU.R, g.R * dpr * zCur);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
     gl.activeTexture(gl.TEXTURE1);
@@ -1159,6 +1192,9 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
       window.removeEventListener("resize", onResize);
       const ext = gl.getExtension("WEBGL_lose_context");
       ext?.loseContext();
+    },
+    getZoom() {
+      return zCur;
     },
   };
 }
