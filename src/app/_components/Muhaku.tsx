@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   clearProfile,
   getProfileSnapshot,
@@ -26,6 +26,13 @@ export default function Muhaku() {
     getServerProfileSnapshot,
   );
   const [justCompleted, setJustCompleted] = useState(false);
+
+  /* PWA: ホーム画面起動・オフラインシェル用の service worker */
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+  }, []);
 
   function handleComplete(p: Profile) {
     setJustCompleted(true);

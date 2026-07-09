@@ -18,6 +18,8 @@ export type GlSandOpts = {
   getBand: () => Band;
   /** 連続ズームの目標倍率(0.5〜8)。省略時は 1 */
   getZoomTarget?: () => number;
+  /** こぼれる量の倍率。0=止まる、1=通常、>1=一気に抜ける(リビール演出用) */
+  getSpillScale?: () => number;
 };
 
 export type GlSandHandle = {
@@ -360,6 +362,7 @@ uniform float u_time;
 uniform vec2 u_emit;
 uniform float u_cut;
 uniform float u_scale;
+uniform float u_spawn;
 out vec4 v_posVel;
 out vec2 v_meta;
 
@@ -379,7 +382,7 @@ void main() {
   float active = step(0.42, hash2(vec2(cohort, cycle)));
 
   if (life <= 0.0) {
-    if (active > 0.5 && hash2(vec2(seed, u_time)) < 0.10) {
+    if (active > 0.5 && hash2(vec2(seed, u_time)) < 0.10 * u_spawn) {
       float r1 = hash2(vec2(seed, cycle + 0.7));
       float r2 = hash2(vec2(seed * 1.7, u_time));
       pos = u_emit + vec2((r1 - 0.5) * 7.0, r2 * 4.0) * u_scale;
@@ -650,7 +653,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   let simU: {
     dt: WebGLUniformLocation | null; time: WebGLUniformLocation | null;
     emit: WebGLUniformLocation | null; cut: WebGLUniformLocation | null;
-    scale: WebGLUniformLocation | null;
+    scale: WebGLUniformLocation | null; spawn: WebGLUniformLocation | null;
   } | null = null;
   let spillU: {
     res: WebGLUniformLocation | null; scale: WebGLUniformLocation | null;
@@ -692,7 +695,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     simU = {
       dt: U(simProg, "u_dt"), time: U(simProg, "u_time"),
       emit: U(simProg, "u_emit"), cut: U(simProg, "u_cut"),
-      scale: U(simProg, "u_scale"),
+      scale: U(simProg, "u_scale"), spawn: U(simProg, "u_spawn"),
     };
     spillU = {
       res: U(spillProg, "u_res"), scale: U(spillProg, "u_scale"),
@@ -823,9 +826,10 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     simDt = dt;
     const g = sphereGeom(w, h);
     if (!gpuOK) {
+      const spawnScale = opts.getSpillScale ? opts.getSpillScale() : 1;
       burstT -= dt;
-      if (burstT <= 0) {
-        const n = 6 + Math.floor(Math.random() * 20);
+      if (burstT <= 0 && spawnScale > 0.01) {
+        const n = Math.round((6 + Math.floor(Math.random() * 20)) * Math.min(3, spawnScale));
         for (let i = 0; i < n && spills.length < MAX_SPILL; i++) {
           spills.push({
             x: g.cx + rand(-3.5, 3.5),
@@ -976,6 +980,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
       gl.uniform2f(simU.emit, g2.cx * dpr, g2.botY * dpr);
       gl.uniform1f(simU.cut, h * 0.8 * dpr);
       gl.uniform1f(simU.scale, dpr);
+      gl.uniform1f(simU.spawn, opts.getSpillScale ? opts.getSpillScale() : 1);
       gl.enable(gl.RASTERIZER_DISCARD);
       gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tfObj);
       gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, pBuf[1 - cur]);

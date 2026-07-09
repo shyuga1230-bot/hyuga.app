@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createGlSand, type GlSandHandle } from "../_lib/glsand";
 import { bandForDate, MONO, type Band } from "../_lib/palette";
 import { createScene, sphereGeom } from "../_lib/scene";
+import { createSound, type SoundHandle } from "../_lib/sound";
 import type { Profile } from "../_lib/store";
 import {
   DAY_MS,
@@ -18,6 +19,32 @@ import {
 const IDLE_MS = 45_000;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 8;
+const MUTE_KEY = "muhaku.sound.v1";
+
+/* 初回リビール: 満ちる → 一拍 → 生きたぶんが一気に抜ける → 残りだけが残る */
+const REVEAL_FILL = 4000;
+const REVEAL_HOLD = 1200;
+const REVEAL_DRAIN = 2600;
+const REVEAL_TOTAL = REVEAL_FILL + REVEAL_HOLD + REVEAL_DRAIN;
+
+function revealAnim(
+  t0: number | null,
+  actual: number,
+): { f: number; spill: number } {
+  if (t0 === null) return { f: actual, spill: 1 };
+  const t = performance.now() - t0;
+  if (t < REVEAL_FILL) {
+    const k = t / REVEAL_FILL;
+    return { f: k * k * (3 - 2 * k), spill: 0 };
+  }
+  if (t < REVEAL_FILL + REVEAL_HOLD) return { f: 1, spill: 0 };
+  if (t < REVEAL_TOTAL) {
+    const k = (t - REVEAL_FILL - REVEAL_HOLD) / REVEAL_DRAIN;
+    const e = 1 - Math.pow(1 - k, 3);
+    return { f: 1 - e * (1 - actual), spill: 4 };
+  }
+  return { f: actual, spill: 1 };
+}
 
 type ZoomLevel = "life" | "year" | "day" | "sec";
 
@@ -60,12 +87,16 @@ export default function MainScene({
   const [dreamDays, setDreamDays] = useState("-,---");
   const [dreamY, setDreamY] = useState<number | null>(null);
   const [idle, setIdle] = useState(false);
-  const [revealVisible, setRevealVisible] = useState(reveal);
+  const [revealVisible, setRevealVisible] = useState(false);
+  const [cinematic, setCinematic] = useState(reveal);
   const [confirming, setConfirming] = useState(false);
   const [zoomZ, setZoomZ] = useState(1);
   const [hintGone, setHintGone] = useState(false);
+  const [muted, setMuted] = useState(false);
   const zoomTargetRef = useRef(1);
   const glHandleRef = useRef<GlSandHandle | null>(null);
+  const soundRef = useRef<SoundHandle | null>(null);
+  const revealT0 = useRef<number | null>(null);
 
   const dream = profile.dreams[0] ?? null;
   const pal = MONO[band];
@@ -76,19 +107,26 @@ export default function MainScene({
     if (!canvas) return;
     const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+    if (reveal && !reduced) revealT0.current = performance.now();
+
     const getDream = () => {
       const d = profileRef.current.dreams[0];
       return d ? dreamFrac(profileRef.current, d) : null;
     };
+    const getFrac = () =>
+      revealAnim(revealT0.current, remainFrac(profileRef.current)).f;
+    const getSpill = () =>
+      revealAnim(revealT0.current, remainFrac(profileRef.current)).spill;
 
     let glSand: ReturnType<typeof createGlSand> | null = null;
     if (!reduced && glCanvasRef.current) {
       try {
         glSand = createGlSand(glCanvasRef.current, {
-          getRemainFrac: () => remainFrac(profileRef.current),
+          getRemainFrac: getFrac,
           getDreamFrac: getDream,
           getBand: () => bandForDate(new Date()),
           getZoomTarget: () => zoomTargetRef.current,
+          getSpillScale: getSpill,
         });
       } catch {
         glSand = null; // WebGL2 が無ければ Canvas 2D にフォールバック
@@ -99,6 +137,18 @@ export default function MainScene({
       if (glHandleRef.current) setZoomZ(glHandleRef.current.getZoom());
     }, 150);
 
+    /* 環境音 */
+    const storedMute =
+      typeof window !== "undefined" &&
+      window.localStorage.getItem(MUTE_KEY) === "off";
+    const sound = createSound({
+      getBand: () => bandForDate(new Date()),
+      getZoom: () => glHandleRef.current?.getZoom() ?? 1,
+      initiallyMuted: storedMute,
+    });
+    soundRef.current = sound;
+    if (storedMute) setTimeout(() => setMuted(true), 0);
+
     /* GL が使えるときはシーン全体を GL が描く。2D はフォールバック専用 */
     canvas.style.display = glSand ? "none" : "";
     if (glCanvasRef.current) {
@@ -107,7 +157,7 @@ export default function MainScene({
     let scene: ReturnType<typeof createScene> | null = null;
     if (!glSand) {
       scene = createScene(canvas, {
-        getRemainFrac: () => remainFrac(profileRef.current),
+        getRemainFrac: getFrac,
         getDreamFrac: getDream,
         getBand: () => bandForDate(new Date()),
         drawSpills: true,
@@ -118,8 +168,10 @@ export default function MainScene({
       glHandleRef.current = null;
       scene?.destroy();
       glSand?.destroy();
+      sound.destroy();
+      soundRef.current = null;
     };
-  }, []);
+  }, [reveal]);
 
   /* 連続ズーム: ホイールとピンチ */
   useEffect(() => {
@@ -244,12 +296,28 @@ export default function MainScene({
     };
   }, []);
 
-  /* 初回のリビール */
+  /* 初回のリビール: 演出が終わってから言葉が現れ、UIが灯る */
   useEffect(() => {
     if (!reveal) return;
-    const t = setTimeout(() => setRevealVisible(false), 4500);
-    return () => clearTimeout(t);
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const delay = reduced ? 300 : REVEAL_TOTAL + 200;
+    const show = setTimeout(() => {
+      setRevealVisible(true);
+      setCinematic(false);
+    }, delay);
+    const hide = setTimeout(() => setRevealVisible(false), delay + 4800);
+    return () => {
+      clearTimeout(show);
+      clearTimeout(hide);
+    };
   }, [reveal]);
+
+  function toggleMute() {
+    const next = !muted;
+    setMuted(next);
+    soundRef.current?.setMuted(next);
+    window.localStorage.setItem(MUTE_KEY, next ? "off" : "on");
+  }
 
   const vars = useMemo(
     () =>
@@ -294,7 +362,7 @@ export default function MainScene({
       <canvas ref={canvasRef} className="stage-canvas" aria-hidden="true" />
       <canvas ref={glCanvasRef} className="stage-canvas" aria-hidden="true" />
 
-      <div className={`stage-ui ${idle ? "is-idle" : ""}`}>
+      <div className={`stage-ui ${idle || cinematic ? "is-idle" : ""}`}>
         <span className="ui-nokori" aria-hidden="true">
           のこり
         </span>
@@ -327,6 +395,10 @@ export default function MainScene({
             <span className="ui-dream-days">この深さまで、あと {dreamDays} 日</span>
           </div>
         )}
+
+        <div className="ui-sound">
+          <button onClick={toggleMute}>{muted ? "音を出す" : "音を消す"}</button>
+        </div>
 
         <div className="ui-reset">
           {confirming ? (
