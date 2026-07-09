@@ -169,6 +169,10 @@ vec3 shadeSand(vec3 p, float glassAtten) {
   float glint = step(0.985, sp) * tw * smoothstep(rad, rad * 0.2, r);
   col += u_sandHi * glint * (u_dark > 0.5 ? 1.2 : 0.25);
 
+  /* 縁の透過光: 砂の薄い縁を光が透ける */
+  float rimT = smoothstep(rad * 0.7, rad, r);
+  col += u_sandHi * rimT * (u_dark > 0.5 ? 0.22 : 0.10);
+
   return col * glassAtten * (u_dark > 0.5 ? 0.82 : 1.0);
 }
 
@@ -187,6 +191,9 @@ vec3 shadePressed(vec3 P1) {
   float sp = hash12(floor(P1.xy * 0.9));
   float tw = 0.5 + 0.5 * sin(u_time * (1.0 + sp * 4.0) + sp * 40.0);
   col += u_sandHi * step(0.99, sp) * tw * (u_dark > 0.5 ? 0.9 : 0.15);
+  /* シルエット際の透過光 */
+  float silD = 1.0 - clamp(length(vec2(P1.x - c.x, P1.y - c.y)) / R, 0.0, 1.0);
+  col += u_sandHi * exp(-silD * 7.0) * (u_dark > 0.5 ? 0.20 : 0.08);
   return col * (u_dark > 0.5 ? 0.82 : 1.0);
 }
 
@@ -242,11 +249,19 @@ void main() {
       if (hit > 0.0) {
         col = shadeSand(p, 0.96);
       } else {
-        /* 砂に当たらない → 暗いガラスの内側ごしに背景 */
+        /* 砂に当たらない → 波長分散つきの屈折で背景が透ける */
         vec3 lp = P1 - C3;
-        float tExit = -2.0 * dot(rd, lp);
-        vec3 exitP = P1 + rd * tExit;
-        col = background(exitP.xy) * (u_dark > 0.5 ? 0.45 : 0.80);
+        vec3 rdR = refract(rd0, N1, 1.0 / 1.105);
+        vec3 rdB = refract(rd0, N1, 1.0 / 1.135);
+        if (dot(rdR, rdR) < 0.001) rdR = rd;
+        if (dot(rdB, rdB) < 0.001) rdB = rd;
+        vec2 exG = (P1 + rd * (-2.0 * dot(rd, lp))).xy;
+        vec2 exR = (P1 + rdR * (-2.0 * dot(rdR, lp))).xy;
+        vec2 exB = (P1 + rdB * (-2.0 * dot(rdB, lp))).xy;
+        col.r = background(exR).r;
+        col.g = background(exG).g;
+        col.b = background(exB).b;
+        col *= (u_dark > 0.5 ? 0.45 : 0.80);
         col *= 1.0 - 0.10 * (1.0 - fres);
       }
     }
@@ -323,6 +338,84 @@ void main() {
   }
 }`;
 
+/* ---------- GPU パーティクル(Transform Feedback) ---------- */
+
+const SIM_VERT = `#version 300 es
+precision highp float;
+layout(location=0) in vec4 a_posVel; /* x, y, vx, vy */
+layout(location=1) in vec2 a_meta;   /* life, seed */
+uniform float u_dt;
+uniform float u_time;
+uniform vec2 u_emit;
+uniform float u_cut;
+uniform float u_scale;
+out vec4 v_posVel;
+out vec2 v_meta;
+
+float hash2(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+void main() {
+  vec2 pos = a_posVel.xy;
+  vec2 vel = a_posVel.zw;
+  float life = a_meta.x;
+  float seed = a_meta.y;
+
+  /* コホート単位で塊になって生まれる(まだらの source) */
+  float cohort = floor(seed * 48.0);
+  float cycle = floor(u_time * 2.6);
+  float active = step(0.42, hash2(vec2(cohort, cycle)));
+
+  if (life <= 0.0) {
+    if (active > 0.5 && hash2(vec2(seed, u_time)) < 0.10) {
+      float r1 = hash2(vec2(seed, cycle + 0.7));
+      float r2 = hash2(vec2(seed * 1.7, u_time));
+      pos = u_emit + vec2((r1 - 0.5) * 7.0, r2 * 4.0) * u_scale;
+      vel = vec2((hash2(vec2(seed, 3.3)) - 0.5) * 14.0, 25.0 + r2 * 70.0) * u_scale;
+      life = 1.0;
+    }
+  } else {
+    vel.y += 320.0 * u_scale * u_dt;
+    float turb = hash2(floor(pos * 0.05 / u_scale) + vec2(floor(u_time * 3.0), seed)) - 0.5;
+    vel.x += turb * 300.0 * u_scale * u_dt;
+    pos += vel * u_dt;
+    if (pos.y > u_cut) life = 0.0;
+  }
+  v_posVel = vec4(pos, vel);
+  v_meta = vec2(life, seed);
+  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+  gl_PointSize = 1.0;
+}`;
+
+const SIM_FRAG = `#version 300 es
+precision highp float;
+out vec4 o;
+void main() { o = vec4(0.0); }`;
+
+const SPILL_VERT = `#version 300 es
+precision highp float;
+layout(location=0) in vec4 a_posVel;
+layout(location=1) in vec2 a_meta;
+uniform vec2 u_res;
+uniform float u_scale;
+uniform float u_fadeStart;
+uniform float u_fadeEnd;
+out float v_alpha;
+out float v_tint;
+float hash1(float n) { return fract(sin(n) * 43758.5453123); }
+void main() {
+  vec2 pos = a_posVel.xy;
+  float life = a_meta.x;
+  float seed = a_meta.y;
+  vec2 clip = (pos / u_res * 2.0 - 1.0) * vec2(1.0, -1.0);
+  gl_Position = vec4(clip, 0.0, 1.0);
+  float fade = pos.y < u_fadeStart ? 1.0 : max(0.0, 1.0 - (pos.y - u_fadeStart) / (u_fadeEnd - u_fadeStart));
+  v_alpha = life > 0.5 ? fade * 0.30 : 0.0;
+  v_tint = hash1(seed * 17.31);
+  gl_PointSize = (1.6 + hash1(seed * 7.7) * 3.2) * u_scale * (life > 0.5 ? 1.0 : 0.0);
+}`;
+
 const BRIGHT_FRAG = `#version 300 es
 precision highp float;
 in vec2 v_uv;
@@ -367,8 +460,12 @@ uniform sampler2D u_scene;
 uniform sampler2D u_dof;
 uniform sampler2D u_bloom1;
 uniform sampler2D u_bloom2;
+uniform sampler2D u_bloom3;
+uniform sampler2D u_streak;
 uniform float u_strength1;
 uniform float u_strength2;
+uniform float u_strength3;
+uniform float u_strength4;
 uniform float u_exposure;
 uniform float u_time;
 uniform vec2 u_res;
@@ -396,9 +493,12 @@ void main() {
   float coc = smoothstep(u_R * 1.35, u_R * 3.2, abs(py - u_cy));
   vec3 blurc = texture(u_dof, v_uv).rgb;
   c = mix(c, blurc, coc * 0.45);
-  /* 二段ブルーム(近距離の芯 + 広域のにじみ) */
+  /* 三段ブルーム(芯 + にじみ + 大気) */
   c += texture(u_bloom1, v_uv).rgb * u_strength1;
   c += texture(u_bloom2, v_uv).rgb * u_strength2;
+  c += texture(u_bloom3, v_uv).rgb * u_strength3;
+  /* アナモルフィック・ストリーク(水平の光条) */
+  c += texture(u_streak, v_uv).rgb * vec3(1.0, 0.98, 0.92) * u_strength4;
   /* ACES トーンマップ */
   c = aces(c * u_exposure);
   /* フィルムグレイン(バンディングのディザを兼ねる) */
@@ -436,6 +536,24 @@ function link(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram 
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
     throw new Error("program link: " + gl.getProgramInfoLog(p));
+  }
+  return p;
+}
+
+function linkTF(
+  gl: WebGL2RenderingContext,
+  vs: string,
+  fs: string,
+  varyings: string[],
+): WebGLProgram {
+  const p = gl.createProgram();
+  if (!p) throw new Error("program alloc failed");
+  gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fs));
+  gl.transformFeedbackVaryings(p, varyings, gl.INTERLEAVED_ATTRIBS);
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error("tf program link: " + gl.getProgramInfoLog(p));
   }
   return p;
 }
@@ -495,10 +613,78 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   const finalU = {
     scene: U(finalProg, "u_scene"), dof: U(finalProg, "u_dof"),
     bloom1: U(finalProg, "u_bloom1"), bloom2: U(finalProg, "u_bloom2"),
+    bloom3: U(finalProg, "u_bloom3"), streak: U(finalProg, "u_streak"),
     strength1: U(finalProg, "u_strength1"), strength2: U(finalProg, "u_strength2"),
+    strength3: U(finalProg, "u_strength3"), strength4: U(finalProg, "u_strength4"),
     exposure: U(finalProg, "u_exposure"), time: U(finalProg, "u_time"),
     res: U(finalProg, "u_res"), cy: U(finalProg, "u_cy"), R: U(finalProg, "u_R"),
   };
+
+  /* ---------- GPU パーティクル(Transform Feedback)。失敗時は CPU にフォールバック ---------- */
+  const SPILL_N = 49152;
+  let gpuOK = false;
+  let simProg: WebGLProgram | null = null;
+  let spillProg: WebGLProgram | null = null;
+  let pBuf: [WebGLBuffer, WebGLBuffer] | null = null;
+  let vaoSim: [WebGLVertexArrayObject, WebGLVertexArrayObject] | null = null;
+  let tfObj: WebGLTransformFeedback | null = null;
+  let cur = 0;
+  let simDt = 0.016;
+  let simU: {
+    dt: WebGLUniformLocation | null; time: WebGLUniformLocation | null;
+    emit: WebGLUniformLocation | null; cut: WebGLUniformLocation | null;
+    scale: WebGLUniformLocation | null;
+  } | null = null;
+  let spillU: {
+    res: WebGLUniformLocation | null; scale: WebGLUniformLocation | null;
+    fadeStart: WebGLUniformLocation | null; fadeEnd: WebGLUniformLocation | null;
+    hi: WebGLUniformLocation | null; lo: WebGLUniformLocation | null;
+    dark: WebGLUniformLocation | null;
+  } | null = null;
+  try {
+    simProg = linkTF(gl, SIM_VERT, SIM_FRAG, ["v_posVel", "v_meta"]);
+    spillProg = link(gl, SPILL_VERT, POINT_FRAG);
+    const init = new Float32Array(SPILL_N * 6);
+    for (let i = 0; i < SPILL_N; i++) init[i * 6 + 5] = Math.random();
+    const mkBuf = () => {
+      const b = gl.createBuffer();
+      if (!b) throw new Error("buffer alloc failed");
+      gl.bindBuffer(gl.ARRAY_BUFFER, b);
+      gl.bufferData(gl.ARRAY_BUFFER, init, gl.DYNAMIC_COPY);
+      return b;
+    };
+    const b0 = mkBuf();
+    const b1 = mkBuf();
+    pBuf = [b0, b1];
+    const mkVao = (buf: WebGLBuffer) => {
+      const v = gl.createVertexArray();
+      if (!v) throw new Error("vao alloc failed");
+      gl.bindVertexArray(v);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 24, 0);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 24, 16);
+      gl.bindVertexArray(null);
+      return v;
+    };
+    vaoSim = [mkVao(b0), mkVao(b1)];
+    tfObj = gl.createTransformFeedback();
+    if (!tfObj) throw new Error("tf alloc failed");
+    simU = {
+      dt: U(simProg, "u_dt"), time: U(simProg, "u_time"),
+      emit: U(simProg, "u_emit"), cut: U(simProg, "u_cut"),
+      scale: U(simProg, "u_scale"),
+    };
+    spillU = {
+      res: U(spillProg, "u_res"), scale: U(spillProg, "u_scale"),
+      fadeStart: U(spillProg, "u_fadeStart"), fadeEnd: U(spillProg, "u_fadeEnd"),
+      hi: U(spillProg, "u_hi"), lo: U(spillProg, "u_lo"), dark: U(spillProg, "u_dark"),
+    };
+    gpuOK = true;
+  } catch {
+    gpuOK = false;
+  }
 
   /* particle buffer */
   const data = new Float32Array((MAX_SPILL + N_VORTEX) * FLOATS_PER);
@@ -536,10 +722,16 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   let bloomB: Target | null = null;
   let bloomQA: Target | null = null; // 1/4: 広域ブルーム
   let bloomQB: Target | null = null;
+  let bloomOA: Target | null = null; // 1/8: 大気のにじみ
+  let bloomOB: Target | null = null;
+  let streakA: Target | null = null; // 1/2: アナモルフィック光条
+  let streakB: Target | null = null;
   let bw = 0;
   let bh = 0;
   let qw = 0;
   let qh = 0;
+  let ow = 0;
+  let oh = 0;
 
   function makeTarget(tw: number, th: number): Target {
     const tex = gl.createTexture();
@@ -579,6 +771,8 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     bh = Math.max(1, Math.floor(canvas.height / 2));
     qw = Math.max(1, Math.floor(canvas.width / 4));
     qh = Math.max(1, Math.floor(canvas.height / 4));
+    ow = Math.max(1, Math.floor(canvas.width / 8));
+    oh = Math.max(1, Math.floor(canvas.height / 8));
     sceneT = makeTarget(canvas.width, canvas.height);
     dofA = makeTarget(bw, bh);
     dofB = makeTarget(bw, bh);
@@ -586,6 +780,10 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     bloomB = makeTarget(bw, bh);
     bloomQA = makeTarget(qw, qh);
     bloomQB = makeTarget(qw, qh);
+    bloomOA = makeTarget(ow, oh);
+    bloomOB = makeTarget(ow, oh);
+    streakA = makeTarget(bw, bh);
+    streakB = makeTarget(bw, bh);
   }
 
   /* ---------- simulation ---------- */
@@ -603,41 +801,44 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   }
 
   function step(dt: number) {
+    simDt = dt;
     const g = sphereGeom(w, h);
-    burstT -= dt;
-    if (burstT <= 0) {
-      const n = 6 + Math.floor(Math.random() * 20);
-      for (let i = 0; i < n && spills.length < MAX_SPILL; i++) {
+    if (!gpuOK) {
+      burstT -= dt;
+      if (burstT <= 0) {
+        const n = 6 + Math.floor(Math.random() * 20);
+        for (let i = 0; i < n && spills.length < MAX_SPILL; i++) {
+          spills.push({
+            x: g.cx + rand(-3.5, 3.5),
+            y: g.botY + rand(0, 5),
+            vx: rand(-7, 7),
+            vy: rand(25, 95),
+            size: rand(0.9, 2.6),
+            tint: Math.random(),
+          });
+        }
+        burstT = rand(0.05, 0.28);
+      }
+      const drips = Math.floor(dt * 260) + (Math.random() < 0.5 ? 1 : 0);
+      for (let i = 0; i < drips && spills.length < MAX_SPILL; i++) {
         spills.push({
-          x: g.cx + rand(-3.5, 3.5),
-          y: g.botY + rand(0, 5),
-          vx: rand(-7, 7),
-          vy: rand(25, 95),
-          size: rand(0.9, 2.6),
+          x: g.cx + rand(-2.5, 2.5),
+          y: g.botY,
+          vx: rand(-5, 5),
+          vy: rand(20, 70),
+          size: rand(0.7, 1.8),
           tint: Math.random(),
         });
       }
-      burstT = rand(0.05, 0.28);
+      for (const s of spills) {
+        s.vy += 320 * dt;
+        s.vx += rand(-90, 90) * dt;
+        s.x += s.vx * dt;
+        s.y += s.vy * dt;
+      }
+      const cut = h * 0.8;
+      spills = spills.filter((s) => s.y < cut);
     }
-    const drips = Math.floor(dt * 260) + (Math.random() < 0.5 ? 1 : 0);
-    for (let i = 0; i < drips && spills.length < MAX_SPILL; i++) {
-      spills.push({
-        x: g.cx + rand(-2.5, 2.5),
-        y: g.botY,
-        vx: rand(-5, 5),
-        vy: rand(20, 70),
-        size: rand(0.7, 1.8),
-        tint: Math.random(),
-      });
-    }
-    for (const s of spills) {
-      s.vy += 320 * dt;
-      s.vx += rand(-90, 90) * dt;
-      s.x += s.vx * dt;
-      s.y += s.vy * dt;
-    }
-    const cut = h * 0.8;
-    spills = spills.filter((s) => s.y < cut);
 
     for (const v of vortex) {
       const pull = 0.012 + 0.06 * (1 - v.r) * (1 - v.r);
@@ -661,21 +862,34 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     let n = 0;
     const fadeStart = h * 0.7;
     const fadeEnd = h * 0.795;
-    for (const s of spills) {
-      const a = s.y < fadeStart ? 1 : Math.max(0, 1 - (s.y - fadeStart) / (fadeEnd - fadeStart));
-      if (a <= 0) continue;
-      const o = n * FLOATS_PER;
-      data[o] = s.x * dpr;
-      data[o + 1] = s.y * dpr;
-      data[o + 2] = s.size * 3.4 * dpr;
-      data[o + 3] = a * 0.85;
-      data[o + 4] = s.tint;
-      n++;
+    if (!gpuOK) {
+      for (const s of spills) {
+        const a = s.y < fadeStart ? 1 : Math.max(0, 1 - (s.y - fadeStart) / (fadeEnd - fadeStart));
+        if (a <= 0) continue;
+        const o = n * FLOATS_PER;
+        data[o] = s.x * dpr;
+        data[o + 1] = s.y * dpr;
+        data[o + 2] = s.size * 3.4 * dpr;
+        data[o + 3] = a * 0.85;
+        data[o + 4] = s.tint;
+        n++;
+      }
     }
+    /* 渦はすり鉢の3D曲面に沿わせて、シーンと同じ見下ろしカメラで投影する */
+    const rad3 = g.R * Math.sqrt(Math.max(0.05, 1 - (d1 / g.R) * (d1 / g.R)));
+    const fw = rad3 * 0.55;
+    const fd = rad3 * 0.55;
+    const tanT = Math.tan(0.22);
+    void hc;
+    void sry;
     for (const v of vortex) {
+      const xw = Math.cos(v.theta) * v.r * rad3;
+      const zw = Math.sin(v.theta) * v.r * rad3;
+      const r3 = Math.hypot(xw, zw);
+      const yw = levelY + fd * Math.exp(-(r3 * r3) / (fw * fw)) - 1.5;
       const o = n * FLOATS_PER;
-      data[o] = (g.cx + Math.cos(v.theta) * v.r * hc) * dpr;
-      data[o + 1] = (levelY + Math.sin(v.theta) * v.r * sry) * dpr;
+      data[o] = (g.cx + xw) * dpr;
+      data[o + 1] = (yw - tanT * zw) * dpr;
       data[o + 2] = v.size * 2.4 * dpr;
       data[o + 3] = (0.14 + 0.5 * (1 - v.r)) * 0.8;
       data[o + 4] = v.tint;
@@ -724,7 +938,45 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     setv(sceneU.accent, pal.accent);
     quadPass(sceneProg);
 
-    /* 2) パーティクルを同じFBOに重ねる */
+    /* 2a) GPUパーティクル: Transform Feedback で約5万粒をGPU上で更新 */
+    if (gpuOK && simProg && spillProg && pBuf && vaoSim && tfObj && simU && spillU) {
+      const g2 = sphereGeom(w, h);
+      gl.useProgram(simProg);
+      gl.uniform1f(simU.dt, Math.min(0.05, simDt));
+      gl.uniform1f(simU.time, timeS);
+      gl.uniform2f(simU.emit, g2.cx * dpr, g2.botY * dpr);
+      gl.uniform1f(simU.cut, h * 0.8 * dpr);
+      gl.uniform1f(simU.scale, dpr);
+      gl.enable(gl.RASTERIZER_DISCARD);
+      gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tfObj);
+      gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, pBuf[1 - cur]);
+      gl.bindVertexArray(vaoSim[cur]);
+      gl.beginTransformFeedback(gl.POINTS);
+      gl.drawArrays(gl.POINTS, 0, SPILL_N);
+      gl.endTransformFeedback();
+      gl.bindVertexArray(null);
+      gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+      gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+      gl.disable(gl.RASTERIZER_DISCARD);
+      cur = 1 - cur;
+
+      gl.enable(gl.BLEND);
+      gl.blendFunc(dark ? gl.ONE : gl.SRC_ALPHA, dark ? gl.ONE : gl.ONE_MINUS_SRC_ALPHA);
+      gl.useProgram(spillProg);
+      gl.uniform2f(spillU.res, canvas.width, canvas.height);
+      gl.uniform1f(spillU.scale, dpr);
+      gl.uniform1f(spillU.fadeStart, h * 0.7 * dpr);
+      gl.uniform1f(spillU.fadeEnd, h * 0.795 * dpr);
+      gl.uniform3f(spillU.hi, hi[0], hi[1], hi[2]);
+      gl.uniform3f(spillU.lo, lo[0], lo[1], lo[2]);
+      gl.uniform1f(spillU.dark, dark ? 1 : 0);
+      gl.bindVertexArray(vaoSim[cur]);
+      gl.drawArrays(gl.POINTS, 0, SPILL_N);
+      gl.bindVertexArray(null);
+      gl.disable(gl.BLEND);
+    }
+
+    /* 2b) CPUパーティクル(渦 + フォールバック時のこぼれ砂) */
     const count = fillBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, count * FLOATS_PER);
@@ -782,6 +1034,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     quadPass(blurProg);
 
     /* 5) 広域ブルーム(1/4) */
+    if (!bloomOA || !bloomOB || !streakA || !streakB) return;
     gl.bindFramebuffer(gl.FRAMEBUFFER, bloomQA.fbo);
     gl.viewport(0, 0, qw, qh);
     gl.useProgram(copyProg);
@@ -799,6 +1052,42 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     gl.uniform2f(blurU.dir, 0, 2.4 / qh);
     quadPass(blurProg);
 
+    /* 5b) 大気のにじみ(1/8) */
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomOA.fbo);
+    gl.viewport(0, 0, ow, oh);
+    gl.useProgram(copyProg);
+    gl.uniform1i(copyU.tex, 0);
+    gl.bindTexture(gl.TEXTURE_2D, bloomQA.tex);
+    quadPass(copyProg);
+    gl.useProgram(blurProg);
+    gl.uniform1i(blurU.tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomOB.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, bloomOA.tex);
+    gl.uniform2f(blurU.dir, 2.6 / ow, 0);
+    quadPass(blurProg);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomOA.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, bloomOB.tex);
+    gl.uniform2f(blurU.dir, 0, 2.6 / oh);
+    quadPass(blurProg);
+
+    /* 5c) アナモルフィック・ストリーク(1/2, 水平にだけ強く伸ばす) */
+    gl.bindFramebuffer(gl.FRAMEBUFFER, streakA.fbo);
+    gl.viewport(0, 0, bw, bh);
+    gl.useProgram(copyProg);
+    gl.uniform1i(copyU.tex, 0);
+    gl.bindTexture(gl.TEXTURE_2D, bloomA.tex);
+    quadPass(copyProg);
+    gl.useProgram(blurProg);
+    gl.uniform1i(blurU.tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, streakB.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, streakA.tex);
+    gl.uniform2f(blurU.dir, 6.0 / bw, 0);
+    quadPass(blurProg);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, streakA.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, streakB.tex);
+    gl.uniform2f(blurU.dir, 14.0 / bw, 0);
+    quadPass(blurProg);
+
     /* 6) 合成: DoF + 二段ブルーム + ACES + 色収差 + グレイン */
     const g = sphereGeom(w, h);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -808,8 +1097,12 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     gl.uniform1i(finalU.dof, 1);
     gl.uniform1i(finalU.bloom1, 2);
     gl.uniform1i(finalU.bloom2, 3);
-    gl.uniform1f(finalU.strength1, dark ? 0.45 : 0.12);
-    gl.uniform1f(finalU.strength2, dark ? 0.4 : 0.14);
+    gl.uniform1i(finalU.bloom3, 4);
+    gl.uniform1i(finalU.streak, 5);
+    gl.uniform1f(finalU.strength1, dark ? 0.4 : 0.1);
+    gl.uniform1f(finalU.strength2, dark ? 0.3 : 0.1);
+    gl.uniform1f(finalU.strength3, dark ? 0.25 : 0.06);
+    gl.uniform1f(finalU.strength4, dark ? 0.3 : 0.05);
     gl.uniform1f(finalU.exposure, dark ? 1.1 : 1.0);
     gl.uniform1f(finalU.time, timeS);
     gl.uniform2f(finalU.res, canvas.width, canvas.height);
@@ -823,6 +1116,10 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     gl.bindTexture(gl.TEXTURE_2D, bloomA.tex);
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, bloomQA.tex);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, bloomOA.tex);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, streakA.tex);
     gl.activeTexture(gl.TEXTURE0);
     quadPass(finalProg);
   }
