@@ -100,6 +100,13 @@ vec3 background(vec2 px) {
     vec2 dd = (px - sc) / vec2(sphR() * 1.15, sphR() * 0.20);
     float sh = exp(-dot(dd, dd));
     col *= 1.0 - sh * (u_dark > 0.5 ? 0.45 : 0.30);
+    /* コースティクス: ガラス球が光を集め、床に揺らめく光紋を落とす */
+    vec2 cuv = (px - vec2(sphC().x, u_res.y * 0.85)) / (sphR() * vec2(0.9, 0.22));
+    float cmask = exp(-dot(cuv, cuv));
+    float cn = fbm(cuv * 7.0 + vec2(u_time * 0.15, -u_time * 0.11));
+    float cn2 = fbm(cuv * 11.0 - vec2(u_time * 0.09, u_time * 0.13));
+    float caust = pow(clamp(cn * cn2 * 3.0, 0.0, 1.0), 5.0);
+    col += u_glow * caust * cmask * (u_dark > 0.5 ? 0.10 : 0.14);
   }
   /* 地平線 */
   float hl = exp(-abs(px.y - fy) * 0.8);
@@ -224,7 +231,7 @@ void main() {
       /* 内部で砂ハイトフィールドをレイマーチ(上面のすり鉢) */
       vec3 p = P1 + rd * 1.0;
       float hit = -1.0;
-      for (int i = 0; i < 48; i++) {
+      for (int i = 0; i < 64; i++) {
         float f = sandHeight(vec2(p.x - c.x, p.z)) - p.y;
         if (f < 1.2) { hit = 1.0; break; }
         p += rd * clamp(f * 0.75, 1.5, R * 0.25);
@@ -295,7 +302,7 @@ void main() {
 }`;
 
 const POINT_FRAG = `#version 300 es
-precision mediump float;
+precision highp float;
 in float v_alpha;
 in float v_tint;
 uniform vec3 u_hi;
@@ -317,7 +324,7 @@ void main() {
 }`;
 
 const BRIGHT_FRAG = `#version 300 es
-precision mediump float;
+precision highp float;
 in vec2 v_uv;
 uniform sampler2D u_tex;
 uniform float u_threshold;
@@ -330,7 +337,7 @@ void main() {
 }`;
 
 const BLUR_FRAG = `#version 300 es
-precision mediump float;
+precision highp float;
 in vec2 v_uv;
 uniform sampler2D u_tex;
 uniform vec2 u_dir;
@@ -344,24 +351,58 @@ void main() {
   outColor = sum;
 }`;
 
+const COPY_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 outColor;
+void main() {
+  outColor = texture(u_tex, v_uv);
+}`;
+
 const FINAL_FRAG = `#version 300 es
-precision mediump float;
+precision highp float;
 in vec2 v_uv;
 uniform sampler2D u_scene;
-uniform sampler2D u_bloom;
-uniform float u_strength;
+uniform sampler2D u_dof;
+uniform sampler2D u_bloom1;
+uniform sampler2D u_bloom2;
+uniform float u_strength1;
+uniform float u_strength2;
+uniform float u_exposure;
 uniform float u_time;
+uniform vec2 u_res;
+uniform float u_cy;
+uniform float u_R;
 out vec4 outColor;
 float hash12(vec2 p) {
   vec3 p3 = fract(vec3(p.xyx) * 0.1031);
   p3 += dot(p3, p3.yzx + 33.33);
   return fract((p3.x + p3.y) * p3.z);
 }
+vec3 aces(vec3 x) {
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
 void main() {
-  vec3 c = texture(u_scene, v_uv).rgb;
-  c += texture(u_bloom, v_uv).rgb * u_strength;
-  /* フィルムグレイン */
-  c += (hash12(v_uv * 913.0 + fract(u_time) * 71.0) - 0.5) * 0.016;
+  float py = (1.0 - v_uv.y) * u_res.y;
+  /* 色収差(端でわずかに) */
+  vec2 cdir = v_uv - 0.5;
+  float cab = dot(cdir, cdir) * 3.0 / u_res.x;
+  vec3 c;
+  c.r = texture(u_scene, v_uv + cdir * cab).r;
+  c.g = texture(u_scene, v_uv).g;
+  c.b = texture(u_scene, v_uv - cdir * cab).b;
+  /* チルトシフト被写界深度: 球にピント、床と壁は柔らかくボケる */
+  float coc = smoothstep(u_R * 1.35, u_R * 3.2, abs(py - u_cy));
+  vec3 blurc = texture(u_dof, v_uv).rgb;
+  c = mix(c, blurc, coc * 0.45);
+  /* 二段ブルーム(近距離の芯 + 広域のにじみ) */
+  c += texture(u_bloom1, v_uv).rgb * u_strength1;
+  c += texture(u_bloom2, v_uv).rgb * u_strength2;
+  /* ACES トーンマップ */
+  c = aces(c * u_exposure);
+  /* フィルムグレイン(バンディングのディザを兼ねる) */
+  c += (hash12(v_uv * 913.0 + fract(u_time) * 71.0) - 0.5) * 0.024;
   outColor = vec4(c, 1.0);
 }`;
 
@@ -423,10 +464,14 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   let h = 0;
   let dpr = 1;
 
+  /* HDR(16bit float)が使えるならフルHDRパイプラインに */
+  const hdrOK = !!gl.getExtension("EXT_color_buffer_float");
+
   const sceneProg = link(gl, QUAD_VERT, SCENE_FRAG);
   const pointProg = link(gl, POINT_VERT, POINT_FRAG);
   const brightProg = link(gl, QUAD_VERT, BRIGHT_FRAG);
   const blurProg = link(gl, QUAD_VERT, BLUR_FRAG);
+  const copyProg = link(gl, QUAD_VERT, COPY_FRAG);
   const finalProg = link(gl, QUAD_VERT, FINAL_FRAG);
 
   const U = (p: WebGLProgram, n: string) => gl.getUniformLocation(p, n);
@@ -446,9 +491,13 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   };
   const brightU = { tex: U(brightProg, "u_tex"), threshold: U(brightProg, "u_threshold") };
   const blurU = { tex: U(blurProg, "u_tex"), dir: U(blurProg, "u_dir") };
+  const copyU = { tex: U(copyProg, "u_tex") };
   const finalU = {
-    scene: U(finalProg, "u_scene"), bloom: U(finalProg, "u_bloom"),
-    strength: U(finalProg, "u_strength"), time: U(finalProg, "u_time"),
+    scene: U(finalProg, "u_scene"), dof: U(finalProg, "u_dof"),
+    bloom1: U(finalProg, "u_bloom1"), bloom2: U(finalProg, "u_bloom2"),
+    strength1: U(finalProg, "u_strength1"), strength2: U(finalProg, "u_strength2"),
+    exposure: U(finalProg, "u_exposure"), time: U(finalProg, "u_time"),
+    res: U(finalProg, "u_res"), cy: U(finalProg, "u_cy"), R: U(finalProg, "u_R"),
   };
 
   /* particle buffer */
@@ -480,16 +529,26 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   gl.bindVertexArray(null);
 
   /* render targets */
-  let sceneT: Target | null = null; // full res
-  let bloomA: Target | null = null; // half res
+  let sceneT: Target | null = null; // フル解像度(SSAA込み)
+  let dofA: Target | null = null;   // 1/2: 被写界深度用のぼかし
+  let dofB: Target | null = null;
+  let bloomA: Target | null = null; // 1/2: 近距離ブルーム
   let bloomB: Target | null = null;
+  let bloomQA: Target | null = null; // 1/4: 広域ブルーム
+  let bloomQB: Target | null = null;
   let bw = 0;
   let bh = 0;
+  let qw = 0;
+  let qh = 0;
 
   function makeTarget(tw: number, th: number): Target {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tw, th, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    if (hdrOK) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, tw, th, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tw, th, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -504,16 +563,29 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
 
   function fit() {
     const host = canvas.parentElement ?? document.body;
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
     w = host.clientWidth;
     h = host.clientHeight;
+    /* スーパーサンプリング: ネイティブDPR × 1.6、ピクセル予算内で自動調整 */
+    const SS = 1.6;
+    const budget = 9_000_000;
+    let scale = Math.min(window.devicePixelRatio || 1, 3) * SS;
+    if (w * h * scale * scale > budget) {
+      scale = Math.sqrt(budget / (w * h));
+    }
+    dpr = scale;
     canvas.width = Math.max(1, Math.floor(w * dpr));
     canvas.height = Math.max(1, Math.floor(h * dpr));
     bw = Math.max(1, Math.floor(canvas.width / 2));
     bh = Math.max(1, Math.floor(canvas.height / 2));
+    qw = Math.max(1, Math.floor(canvas.width / 4));
+    qh = Math.max(1, Math.floor(canvas.height / 4));
     sceneT = makeTarget(canvas.width, canvas.height);
+    dofA = makeTarget(bw, bh);
+    dofB = makeTarget(bw, bh);
     bloomA = makeTarget(bw, bh);
     bloomB = makeTarget(bw, bh);
+    bloomQA = makeTarget(qw, qh);
+    bloomQB = makeTarget(qw, qh);
   }
 
   /* ---------- simulation ---------- */
@@ -669,13 +741,32 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     gl.bindVertexArray(null);
     gl.disable(gl.BLEND);
 
-    /* 3) 輝度抽出 → ぼかし */
+    /* 3) 被写界深度用: シーンを1/2に落としてぼかす */
+    if (!dofA || !dofB || !bloomQA || !bloomQB) return;
     gl.activeTexture(gl.TEXTURE0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dofA.fbo);
+    gl.viewport(0, 0, bw, bh);
+    gl.useProgram(copyProg);
+    gl.uniform1i(copyU.tex, 0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
+    quadPass(copyProg);
+    gl.useProgram(blurProg);
+    gl.uniform1i(blurU.tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dofB.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, dofA.tex);
+    gl.uniform2f(blurU.dir, 2.2 / bw, 0);
+    quadPass(blurProg);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dofA.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, dofB.tex);
+    gl.uniform2f(blurU.dir, 0, 2.2 / bh);
+    quadPass(blurProg);
+
+    /* 4) 輝度抽出 → 近距離ブルーム(1/2) */
     gl.bindFramebuffer(gl.FRAMEBUFFER, bloomA.fbo);
     gl.viewport(0, 0, bw, bh);
     gl.useProgram(brightProg);
     gl.uniform1i(brightU.tex, 0);
-    gl.uniform1f(brightU.threshold, dark ? 0.8 : 0.9);
+    gl.uniform1f(brightU.threshold, dark ? 0.75 : 0.9);
     gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
     quadPass(brightProg);
 
@@ -690,18 +781,48 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     gl.uniform2f(blurU.dir, 0, 1.7 / bh);
     quadPass(blurProg);
 
-    /* 4) 合成 + フィルムグレイン */
+    /* 5) 広域ブルーム(1/4) */
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomQA.fbo);
+    gl.viewport(0, 0, qw, qh);
+    gl.useProgram(copyProg);
+    gl.uniform1i(copyU.tex, 0);
+    gl.bindTexture(gl.TEXTURE_2D, bloomA.tex);
+    quadPass(copyProg);
+    gl.useProgram(blurProg);
+    gl.uniform1i(blurU.tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomQB.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, bloomQA.tex);
+    gl.uniform2f(blurU.dir, 2.4 / qw, 0);
+    quadPass(blurProg);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomQA.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, bloomQB.tex);
+    gl.uniform2f(blurU.dir, 0, 2.4 / qh);
+    quadPass(blurProg);
+
+    /* 6) 合成: DoF + 二段ブルーム + ACES + 色収差 + グレイン */
+    const g = sphereGeom(w, h);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.useProgram(finalProg);
     gl.uniform1i(finalU.scene, 0);
-    gl.uniform1i(finalU.bloom, 1);
-    gl.uniform1f(finalU.strength, dark ? 0.55 : 0.15);
+    gl.uniform1i(finalU.dof, 1);
+    gl.uniform1i(finalU.bloom1, 2);
+    gl.uniform1i(finalU.bloom2, 3);
+    gl.uniform1f(finalU.strength1, dark ? 0.45 : 0.12);
+    gl.uniform1f(finalU.strength2, dark ? 0.4 : 0.14);
+    gl.uniform1f(finalU.exposure, dark ? 1.1 : 1.0);
     gl.uniform1f(finalU.time, timeS);
+    gl.uniform2f(finalU.res, canvas.width, canvas.height);
+    gl.uniform1f(finalU.cy, g.cy * dpr);
+    gl.uniform1f(finalU.R, g.R * dpr);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
     gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, dofA.tex);
+    gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, bloomA.tex);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, bloomQA.tex);
     gl.activeTexture(gl.TEXTURE0);
     quadPass(finalProg);
   }
