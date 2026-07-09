@@ -9,8 +9,8 @@ import { MONO, type Band } from "./palette";
 
 export type SceneOpts = {
   getRemainFrac: () => number;
-  /** 夢に到達する瞬間の残り割合(0..1)。なければ null */
-  getDreamFrac: () => number | null;
+  /** 各目標に到達する瞬間の残り割合(0..1) */
+  getDreamFracs: () => number[];
   getBand: () => Band;
   /** WebGL レイヤーが落下砂を描くときは false(2D 側の砂は止める) */
   drawSpills?: boolean;
@@ -260,8 +260,8 @@ export function createScene(canvas: HTMLCanvasElement, opts: SceneOpts): SceneHa
     ctx.fill();
 
     /* 夢のリング(ガラスに刻まれた琥珀の緯線)— 砂面がここまで沈んだ日が、その年齢 */
-    const fD = opts.getDreamFrac();
-    if (fD !== null && fD > 0 && fD < 1) {
+    for (const fD of opts.getDreamFracs()) {
+      if (!(fD > 0 && fD < 1)) continue;
       const dyL = cy + R - 2 * R * fD;
       const ddL = Math.abs(dyL - cy);
       const hcL = R * Math.sqrt(Math.max(0.05, 1 - (ddL / R) * (ddL / R)));

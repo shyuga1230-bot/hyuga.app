@@ -125,6 +125,42 @@ body {
   margin: 0;
 }
 
+.ritual-dreams {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.ritual-dreams li {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  justify-content: center;
+  font-family: var(--mincho);
+  font-size: 12.5px;
+  letter-spacing: 0.14em;
+  color: #cfc9b9;
+}
+
+.ritual-dreams li button {
+  background: none;
+  border: none;
+  color: #6e6a60;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+}
+
+.ritual-dreams li button:hover,
+.ritual-dreams li button:focus-visible {
+  color: #a8834c;
+  outline: none;
+}
+
 .ritual-btn {
   font-family: var(--mincho);
   font-size: 13px;
@@ -331,6 +367,31 @@ body {
   text-shadow: 0 0 8px rgba(0, 0, 0, 0.35);
 }
 
+.ui-goal {
+  position: absolute;
+  right: 4%;
+  bottom: 12.5%;
+  pointer-events: auto;
+}
+
+.ui-goal button {
+  font-size: 10px;
+  letter-spacing: 0.26em;
+  color: var(--f-dim);
+  opacity: 0.5;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+  transition: opacity 0.4s ease;
+}
+
+.ui-goal button:hover,
+.ui-goal button:focus-visible {
+  opacity: 1;
+  outline: none;
+}
+
 .ui-sound {
   position: absolute;
   right: 4%;
@@ -399,6 +460,95 @@ body {
   border-bottom: 1px solid var(--f-dim);
   cursor: pointer;
   padding: 2px 4px;
+}
+
+/* ---------- 目標を足すダイアログ ---------- */
+
+.goal-dialog {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(5, 5, 4, 0.55);
+  padding: 24px;
+  z-index: 5;
+}
+
+.goal-card {
+  background: rgba(12, 12, 10, 0.94);
+  border: 1px solid #3d3a33;
+  border-radius: 6px;
+  padding: 34px 36px;
+  max-width: 460px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  color: #ece7d9;
+  animation: ritual-in 0.8s ease both;
+}
+
+.goal-q {
+  font-family: var(--mincho);
+  font-weight: 300;
+  font-size: 16px;
+  letter-spacing: 0.22em;
+  margin: 0;
+  text-align: center;
+}
+
+.goal-s {
+  font-size: 11px;
+  line-height: 2;
+  letter-spacing: 0.06em;
+  color: #8f8b7f;
+  margin: 0;
+  text-align: center;
+}
+
+.goal-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
+}
+
+.goal-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  font-family: var(--mincho);
+  font-size: 12.5px;
+  letter-spacing: 0.12em;
+  color: #cfc9b9;
+}
+
+.goal-list li button {
+  background: none;
+  border: none;
+  color: #6e6a60;
+  cursor: pointer;
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  padding: 2px 4px;
+}
+
+.goal-list li button:hover,
+.goal-list li button:focus-visible {
+  color: #a8834c;
+  outline: none;
+}
+
+.goal-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
 }
 
 /* ---------- 初回のリビール ---------- */

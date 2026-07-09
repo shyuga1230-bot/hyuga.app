@@ -1,16 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import type { Profile } from "../_lib/store";
+import type { Dream, Profile } from "../_lib/store";
 
 /**
- * 暗転から始まる儀式。生年月日 → 終わりの日 → やりたいこと。
+ * 暗転から始まる儀式。生年月日 → 終わりの日 → やりたいこと(いくつでも)。
  * 問いはひとつずつ、急かさない。
  */
 export default function Onboarding({ onComplete }: { onComplete: (p: Profile) => void }) {
   const [step, setStep] = useState(0);
   const [birth, setBirth] = useState("");
   const [lifeYears, setLifeYears] = useState("");
+  const [dreams, setDreams] = useState<Dream[]>([]);
   const [dreamLabel, setDreamLabel] = useState("");
   const [dreamAge, setDreamAge] = useState("");
   const [error, setError] = useState("");
@@ -52,32 +53,45 @@ export default function Onboarding({ onComplete }: { onComplete: (p: Profile) =>
     go(3);
   }
 
-  function submitDream(skip: boolean) {
-    if (!skip) {
-      const a = Number(dreamAge);
-      if (!dreamLabel.trim()) {
-        setError("ひとつで、かまいません。");
-        return;
-      }
-      if (!Number.isFinite(a) || a <= currentAge()) {
-        setError("その歳は、もう通り過ぎました。");
-        return;
-      }
-      if (a > Number(lifeYears)) {
-        setError("それは、終わりのあとになっています。");
-        return;
-      }
+  function validateDream(): string | null {
+    const a = Number(dreamAge);
+    if (dreams.length >= 8) return "その器には、これ以上刻めません。(8つまで)";
+    if (!dreamLabel.trim()) return "ひとつで、かまいません。";
+    if (!Number.isFinite(a) || a <= currentAge())
+      return "その歳は、もう通り過ぎました。";
+    if (a > Number(lifeYears)) return "それは、終わりのあとになっています。";
+    return null;
+  }
+
+  function pushDream(): boolean {
+    const err = validateDream();
+    if (err) {
+      setError(err);
+      return false;
+    }
+    setDreams([...dreams, { label: dreamLabel.trim(), age: Number(dreamAge) }]);
+    setDreamLabel("");
+    setDreamAge("");
+    setError("");
+    return true;
+  }
+
+  function submitDreams() {
+    if (dreamLabel.trim() || dreamAge.trim()) {
+      if (!pushDream()) return;
     }
     go(4);
   }
 
   function finish() {
+    const withInput =
+      dreamLabel.trim() && !validateDream()
+        ? [...dreams, { label: dreamLabel.trim(), age: Number(dreamAge) }]
+        : dreams;
     const p: Profile = {
       birth,
       lifeYears: Number(lifeYears),
-      dreams: dreamLabel.trim()
-        ? [{ label: dreamLabel.trim(), age: Number(dreamAge) }]
-        : [],
+      dreams: [...withInput].sort((a, b) => a.age - b.age),
       createdAt: new Date().toISOString(),
     };
     onComplete(p);
@@ -150,8 +164,25 @@ export default function Onboarding({ onComplete }: { onComplete: (p: Profile) =>
         <section key="s3" className="ritual-step">
           <p className="ritual-q">終わるまでに、何をしますか。</p>
           <p className="ritual-s">
-            ひとつで、かまいません。あなたの残りの中に、沈めておきます。
+            いくつでも、かまいません。歳の深さを変えて、残りの中に沈めておきます。
           </p>
+          {dreams.length > 0 && (
+            <ul className="ritual-dreams">
+              {dreams.map((d, i) => (
+                <li key={`${d.label}-${d.age}-${i}`}>
+                  <span>
+                    {d.label} — {d.age}歳
+                  </span>
+                  <button
+                    onClick={() => setDreams(dreams.filter((_, j) => j !== i))}
+                    aria-label="この目標を消す"
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
           <input
             type="text"
             className="ritual-in"
@@ -173,12 +204,17 @@ export default function Onboarding({ onComplete }: { onComplete: (p: Profile) =>
             <span className="ritual-agelabel">歳までに</span>
           </div>
           {error && <p className="ritual-err">{error}</p>}
-          <button className="ritual-btn" onClick={() => submitDream(false)}>
+          <button className="ritual-skip" onClick={pushDream}>
+            もうひとつ沈める
+          </button>
+          <button className="ritual-btn" onClick={submitDreams}>
             つぎへ
           </button>
-          <button className="ritual-skip" onClick={() => submitDream(true)}>
-            あとで決める
-          </button>
+          {dreams.length === 0 && (
+            <button className="ritual-skip" onClick={() => go(4)}>
+              あとで決める
+            </button>
+          )}
         </section>
       )}
 

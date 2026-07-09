@@ -14,7 +14,8 @@ import { sphereGeom } from "./scene";
 
 export type GlSandOpts = {
   getRemainFrac: () => number;
-  getDreamFrac: () => number | null;
+  /** 各目標に到達する瞬間の残り割合(0..1)。最大8つまで描画 */
+  getDreamFracs: () => number[];
   getBand: () => Band;
   /** 連続ズームの目標倍率(0.5〜8)。省略時は 1 */
   getZoomTarget?: () => number;
@@ -50,7 +51,8 @@ in vec2 v_uv;
 uniform vec2 u_res;
 uniform float u_time;
 uniform float u_remain;
-uniform float u_dreamF;   // 0..1、無ければ -1
+uniform float u_dreams[8]; // 各目標の残り割合(0..1)
+uniform float u_dreamCount;
 uniform float u_dark;
 uniform vec3 u_bgTop;
 uniform vec3 u_bgBottom;
@@ -290,9 +292,12 @@ void main() {
     float spec = pow(max(dot(N1, H), 0.0), 90.0);
     col += vec3(1.0) * spec * (u_dark > 0.5 ? 0.45 : 0.5);
 
-    /* 夢のリング: 球面上の発光緯線 */
-    if (u_dreamF > 0.0 && u_dreamF < 1.0) {
-      float ringY = c.y + R - 2.0 * R * u_dreamF;
+    /* 夢のリング: 球面上の発光緯線(目標の数だけ) */
+    for (int di = 0; di < 8; di++) {
+      if (float(di) >= u_dreamCount) break;
+      float fD = u_dreams[di];
+      if (fD <= 0.0 || fD >= 1.0) continue;
+      float ringY = c.y + R - 2.0 * R * fD;
       float dy = P1.y - ringY;
       float ringGlow = exp(-dy * dy / 6.0);
       float frontW = 0.45 - 0.55 * (P1.z / R); /* 手前ほど強い */
@@ -612,7 +617,8 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
   const U = (p: WebGLProgram, n: string) => gl.getUniformLocation(p, n);
   const sceneU = {
     res: U(sceneProg, "u_res"), time: U(sceneProg, "u_time"),
-    remain: U(sceneProg, "u_remain"), dreamF: U(sceneProg, "u_dreamF"),
+    remain: U(sceneProg, "u_remain"),
+    dreams: U(sceneProg, "u_dreams"), dreamCount: U(sceneProg, "u_dreamCount"),
     dark: U(sceneProg, "u_dark"),
     bgTop: U(sceneProg, "u_bgTop"), bgBottom: U(sceneProg, "u_bgBottom"),
     glow: U(sceneProg, "u_glow"),
@@ -935,7 +941,7 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     const dark = pal.dark;
     const hi = hexVec(pal.sandHi);
     const lo = hexVec(pal.sandLo);
-    const dreamF = opts.getDreamFrac();
+    const dreamFracs = opts.getDreamFracs();
 
     /* 連続ズーム: 目標へなめらかに追従。寄るほど焦点が排出口へ移る */
     const zt = Math.min(8, Math.max(0.5, opts.getZoomTarget ? opts.getZoomTarget() : 1));
@@ -953,7 +959,11 @@ export function createGlSand(canvas: HTMLCanvasElement, opts: GlSandOpts): GlSan
     gl.uniform2f(sceneU.res, canvas.width, canvas.height);
     gl.uniform1f(sceneU.time, timeS);
     gl.uniform1f(sceneU.remain, opts.getRemainFrac());
-    gl.uniform1f(sceneU.dreamF, dreamF === null ? -1 : dreamF);
+    const dreamArr = new Float32Array(8);
+    const dreamN = Math.min(8, dreamFracs.length);
+    for (let i = 0; i < dreamN; i++) dreamArr[i] = dreamFracs[i];
+    gl.uniform1fv(sceneU.dreams, dreamArr);
+    gl.uniform1f(sceneU.dreamCount, dreamN);
     gl.uniform1f(sceneU.dark, dark ? 1 : 0);
     const setv = (loc: WebGLUniformLocation | null, hex: string) => {
       const v = hexVec(hex);
