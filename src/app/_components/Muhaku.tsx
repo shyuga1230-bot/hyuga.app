@@ -27,9 +27,9 @@ export default function Muhaku() {
   );
   const [justCompleted, setJustCompleted] = useState(false);
 
-  /* PWA: ホーム画面起動・オフラインシェル用の service worker */
+  /* PWA: ホーム画面起動・オフラインシェル用の service worker(通常デプロイ時のみ) */
   useEffect(() => {
-    if ("serviceWorker" in navigator) {
+    if ("serviceWorker" in navigator && window.location.pathname === "/") {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
   }, []);
