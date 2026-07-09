@@ -51,29 +51,40 @@ export default function MainScene({
     if (!canvas) return;
     const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+    const getDream = () => {
+      const d = profileRef.current.dreams[0];
+      return d ? dreamFrac(profileRef.current, d) : null;
+    };
+
     let glSand: ReturnType<typeof createGlSand> | null = null;
     if (!reduced && glCanvasRef.current) {
       try {
         glSand = createGlSand(glCanvasRef.current, {
           getRemainFrac: () => remainFrac(profileRef.current),
+          getDreamFrac: getDream,
           getBand: () => bandForDate(new Date()),
         });
       } catch {
-        glSand = null; // WebGL2 が無ければ 2D の砂にフォールバック
+        glSand = null; // WebGL2 が無ければ Canvas 2D にフォールバック
       }
     }
 
-    const scene = createScene(canvas, {
-      getRemainFrac: () => remainFrac(profileRef.current),
-      getDreamFrac: () => {
-        const d = profileRef.current.dreams[0];
-        return d ? dreamFrac(profileRef.current, d) : null;
-      },
-      getBand: () => bandForDate(new Date()),
-      drawSpills: !glSand,
-    });
+    /* GL が使えるときはシーン全体を GL が描く。2D はフォールバック専用 */
+    canvas.style.display = glSand ? "none" : "";
+    if (glCanvasRef.current) {
+      glCanvasRef.current.style.display = glSand ? "" : "none";
+    }
+    let scene: ReturnType<typeof createScene> | null = null;
+    if (!glSand) {
+      scene = createScene(canvas, {
+        getRemainFrac: () => remainFrac(profileRef.current),
+        getDreamFrac: getDream,
+        getBand: () => bandForDate(new Date()),
+        drawSpills: true,
+      });
+    }
     return () => {
-      scene.destroy();
+      scene?.destroy();
       glSand?.destroy();
     };
   }, []);
