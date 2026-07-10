@@ -20,6 +20,7 @@ import {
 
 function CopyButton({ text }: { text: string }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const [showManual, setShowManual] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(
@@ -30,30 +31,65 @@ function CopyButton({ text }: { text: string }) {
   );
 
   const copy = async () => {
+    let ok = false;
     try {
-      if (!navigator.clipboard) throw new Error("clipboard unavailable");
-      await navigator.clipboard.writeText(text);
-      setState("copied");
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
     } catch {
-      setState("failed");
+      // 埋め込みページ等でクリップボード権限がない場合は旧方式へ
     }
+    if (!ok) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.cssText = "position:fixed;left:-9999px;top:0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ok = document.execCommand("copy");
+        ta.remove();
+      } catch {
+        ok = false;
+      }
+    }
+    setState(ok ? "copied" : "failed");
+    if (!ok) setShowManual(true);
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => setState("idle"), 2000);
   };
 
   return (
-    <button
-      type="button"
-      onClick={() => void copy()}
-      aria-live="polite"
-      className="rounded-full border border-black/10 px-5 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-black/5 dark:border-white/15 dark:hover:bg-white/10"
-    >
-      {state === "copied"
-        ? "コピーしました ✓"
-        : state === "failed"
-          ? "コピーできませんでした"
-          : "結果をコピー"}
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => void copy()}
+        aria-live="polite"
+        className="rounded-full border border-black/10 px-5 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-black/5 dark:border-white/15 dark:hover:bg-white/10"
+      >
+        {state === "copied"
+          ? "コピーしました ✓"
+          : state === "failed"
+            ? "コピーできませんでした"
+            : "結果をコピー"}
+      </button>
+      {showManual && (
+        <div className="w-full">
+          <p className="mb-2 text-xs text-ink-secondary">
+            自動コピーできない環境のようです。下の文章を長押し(または全選択)してコピーしてください。
+          </p>
+          <textarea
+            readOnly
+            value={text}
+            rows={7}
+            onFocus={(e) => e.target.select()}
+            className="w-full rounded-lg border border-black/10 bg-transparent p-3 text-xs leading-relaxed text-foreground dark:border-white/15"
+          />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -70,6 +106,7 @@ function buildShareText(
     `来年も続いてる確率(偏見): ${verdict.survivalRate}%`,
     `${personality.a.name}: ${personality.a.mbti.type}(${personality.a.mbti.nickname})・${personality.a.love.name}`,
     `${personality.b.name}: ${personality.b.mbti.type}(${personality.b.mbti.nickname})・${personality.b.love.name}`,
+    `ラブタイプ相性(偏見): ${personality.loveMatch.score}%`,
   ].join("\n");
 }
 
@@ -269,6 +306,18 @@ export function Results({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <PersonalityBlock person={personality.a} colorClass="bg-series-a" />
           <PersonalityBlock person={personality.b} colorClass="bg-series-b" />
+        </div>
+        <div className="mt-4 rounded-xl border border-black/10 p-4 text-center dark:border-white/10">
+          <div className="text-xs text-ink-muted">ラブタイプ相性(偏見)</div>
+          <div className="mt-1 text-sm text-ink-secondary">
+            {personality.a.love.name} × {personality.b.love.name}
+          </div>
+          <div className="mt-1 text-3xl font-bold text-foreground">
+            {personality.loveMatch.score}%
+          </div>
+          <p className="mt-2 text-xs leading-5 text-ink-secondary">
+            {personality.loveMatch.comment}
+          </p>
         </div>
         <ul className="mt-4 flex flex-col gap-2">
           {personality.compat.map((c, i) => (

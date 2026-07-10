@@ -39,6 +39,8 @@ export interface PairPersonality {
   b: PersonPersonality;
   /** ふたりの組み合わせに対する偏見 */
   compat: string[];
+  /** ラブタイプ16同士の相性(偏見) */
+  loveMatch: { score: number; comment: string };
 }
 
 const bound = (v: number, lo = -1, hi = 1) => Math.min(hi, Math.max(lo, v));
@@ -239,8 +241,46 @@ function buildCompat(a: PersonPersonality, b: PersonPersonality): string[] {
   return compat;
 }
 
+/** ラブタイプ16同士の相性(偏見)。軸ごとの組み合わせを加点方式で採点 */
+function buildLoveMatch(
+  aKey: string,
+  bKey: string,
+): { score: number; comment: string } {
+  const pair = (i: number) => aKey[i] + bKey[i];
+  let score = 13; // 基礎点(ここまで読み込んだ努力への加点)
+
+  // 主導: 追×待が黄金比
+  const lead = pair(0);
+  score += lead === "追待" || lead === "待追" ? 25 : lead === "追追" ? 12 : 6;
+  // 速度: 揃っているほど楽
+  const speed = pair(1);
+  score += speed === "即即" ? 20 : speed === "ママ" ? 14 : 9;
+  // 糖度: 甘甘は最強、甘塩はおにぎり
+  const sugar = pair(2);
+  score += sugar === "甘甘" ? 20 : sugar === "甘塩" || sugar === "塩甘" ? 14 : 7;
+  // 重さ: 重×重は共鳴、重×軽は片方が潰れがち
+  const weight = pair(3);
+  score += weight === "重重" ? 18 : weight === "軽軽" ? 15 : 9;
+
+  const comment =
+    score >= 85
+      ? "型の組み合わせとしてはほぼ理想形。この相性で別れたら型のせいにはできません。"
+      : score >= 70
+        ? "かなり噛み合う組み合わせです。うまくいっているのは偶然ではなかった。"
+        : score >= 55
+          ? "工夫次第の組み合わせ。うまく回っているなら、それはふたりの企業努力です。"
+          : "型としては噛み合っていません。それでも続いているなら、毎日が小さな奇跡です。";
+
+  return { score, comment };
+}
+
 export function diagnosePersonalities(s: PairStats): PairPersonality {
   const a = diagnosePerson(s.a, s.b, s);
   const b = diagnosePerson(s.b, s.a, s);
-  return { a, b, compat: buildCompat(a, b) };
+  return {
+    a,
+    b,
+    compat: buildCompat(a, b),
+    loveMatch: buildLoveMatch(a.love.key, b.love.key),
+  };
 }
