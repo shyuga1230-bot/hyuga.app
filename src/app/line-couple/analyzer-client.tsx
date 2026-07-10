@@ -1,9 +1,14 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { analyzePair, type PairStats } from "@/lib/line/analyze";
 import { generateDemoExport } from "@/lib/line/demo";
-import { parseLineExport, type ParseResult } from "@/lib/line/parser";
+import { fmtDuration, pct } from "@/lib/line/format";
+import {
+  parseLineExport,
+  type ParsedMessage,
+  type ParseResult,
+} from "@/lib/line/parser";
 import { judge, type Verdict } from "@/lib/line/verdict";
 import { Results } from "./results";
 
@@ -11,8 +16,15 @@ const MIN_MESSAGES = 30;
 
 type Phase =
   | { kind: "input" }
-  | { kind: "pick"; parsed: ParseResult }
-  | { kind: "result"; stats: PairStats; verdict: Verdict };
+  | { kind: "pick"; parsed: ParseResult; lineCount: number }
+  | {
+      kind: "analyzing";
+      stats: PairStats;
+      verdict: Verdict;
+      messages: ParsedMessage[];
+      lineCount: number;
+    }
+  | { kind: "result"; stats: PairStats; verdict: Verdict; messages: ParsedMessage[] };
 
 /** 内容を隠して構造だけ残す(数字・記号・タブ・日付/時刻の部品のみ表示) */
 function maskForDiagnostics(raw: string): string {
@@ -59,7 +71,7 @@ export default function AnalyzerClient() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const runAnalysis = useCallback(
-    (parsed: ParseResult, nameA: string, nameB: string) => {
+    (parsed: ParseResult, nameA: string, nameB: string, lineCount: number) => {
       const stats = analyzePair(parsed.messages, nameA, nameB);
       if (stats === null || stats.totalMessages < MIN_MESSAGES) {
         setError(
@@ -68,13 +80,20 @@ export default function AnalyzerClient() {
         return;
       }
       setError(null);
-      setPhase({ kind: "result", stats, verdict: judge(stats) });
+      setPhase({
+        kind: "analyzing",
+        stats,
+        verdict: judge(stats),
+        messages: parsed.messages,
+        lineCount,
+      });
     },
     [],
   );
 
   const handleText = useCallback(
     (text: string) => {
+      const lineCount = text.split("\n").length;
       let parsed: ParseResult;
       try {
         parsed = parseLineExport(text);
@@ -108,10 +127,11 @@ export default function AnalyzerClient() {
           parsed,
           parsed.participants[0].name,
           parsed.participants[1].name,
+          lineCount,
         );
       } else {
         // グループトーク等: 2人選んでもらう
-        setPhase({ kind: "pick", parsed });
+        setPhase({ kind: "pick", parsed, lineCount });
       }
     },
     [runAnalysis],
@@ -248,8 +268,23 @@ export default function AnalyzerClient() {
       {phase.kind === "pick" && (
         <ParticipantPicker
           parsed={phase.parsed}
-          onPick={(a, b) => runAnalysis(phase.parsed, a, b)}
+          onPick={(a, b) => runAnalysis(phase.parsed, a, b, phase.lineCount)}
           onBack={reset}
+        />
+      )}
+
+      {phase.kind === "analyzing" && (
+        <AnalysisTheater
+          stats={phase.stats}
+          lineCount={phase.lineCount}
+          onDone={() =>
+            setPhase({
+              kind: "result",
+              stats: phase.stats,
+              verdict: phase.verdict,
+              messages: phase.messages,
+            })
+          }
         />
       )}
 
@@ -257,6 +292,7 @@ export default function AnalyzerClient() {
         <Results
           stats={phase.stats}
           verdict={phase.verdict}
+          messages={phase.messages}
           onReset={reset}
         />
       )}
@@ -280,6 +316,126 @@ export default function AnalyzerClient() {
         </div>
       )}
     </div>
+  );
+}
+
+/** 解析の進行を実測値つきで見せる演出。結果は計算済みで、見せ方だけ段階的 */
+function AnalysisTheater({
+  stats,
+  lineCount,
+  onDone,
+}: {
+  stats: PairStats;
+  lineCount: number;
+  onDone: () => void;
+}) {
+  const steps = useMemo(() => {
+    const { a, b } = stats;
+    const phrase = a.topPhrases[0] ?? b.topPhrases[0];
+    const phraseCount = a.topPhrases.length + b.topPhrases.length;
+    return [
+      {
+        label: "トーク履歴を解読しています",
+        result: `${lineCount.toLocaleString()}行を読み込みました`,
+        wait: 600,
+      },
+      {
+        label: "メッセージを数えています",
+        result: `${stats.totalMessages.toLocaleString()}通(${a.name} ${a.messageCount.toLocaleString()} / ${b.name} ${b.messageCount.toLocaleString()})`,
+        wait: 750,
+      },
+      {
+        label: "返信速度を計測しています",
+        result: `中央値 ${a.medianReplyMs !== null ? fmtDuration(a.medianReplyMs) : "—"} / ${b.medianReplyMs !== null ? fmtDuration(b.medianReplyMs) : "—"}`,
+        wait: 700,
+      },
+      {
+        label: "深夜の行動を調査しています",
+        result: `深夜率 ${pct((a.lateNightRate + b.lateNightRate) / 2)}を確認`,
+        wait: 650,
+      },
+      {
+        label: "口癖を採掘しています",
+        result: phrase
+          ? `「${phrase.token}」ほか${phraseCount}件を検出`
+          : "特筆すべき口癖は見つかりませんでした",
+        wait: 850,
+      },
+      {
+        label: "愛着スタイルを鑑定しています",
+        result: "鑑定完了",
+        wait: 700,
+      },
+      {
+        label: "偏見を醸成しています",
+        result: "十分に発酵しました",
+        wait: 1000,
+      },
+    ];
+  }, [stats, lineCount]);
+
+  const [done, setDone] = useState(0);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const finished = done >= steps.length;
+
+  useEffect(() => {
+    if (finished) {
+      timer.current = setTimeout(onDone, 500);
+    } else {
+      timer.current = setTimeout(() => setDone((d) => d + 1), steps[done].wait);
+    }
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+    };
+    // onDoneは親のsetPhaseで安定
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [done, finished, steps]);
+
+  return (
+    <section
+      className="flex flex-col gap-4 rounded-2xl border border-black/10 p-6 dark:border-white/10"
+      aria-live="polite"
+    >
+      <h2 className="text-base font-semibold text-foreground">解析中…</h2>
+      <ul className="flex flex-col gap-2.5">
+        {steps.slice(0, Math.min(done + 1, steps.length)).map((step, i) => (
+          <li key={step.label} className="flex items-start gap-2.5 text-sm">
+            <span
+              aria-hidden
+              className={
+                i < done
+                  ? "text-green-600 dark:text-green-400"
+                  : "inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-viz-baseline border-t-foreground"
+              }
+              style={{ marginTop: i < done ? 0 : 2 }}
+            >
+              {i < done ? "✓" : ""}
+            </span>
+            <span>
+              <span className="text-foreground">{step.label}</span>
+              {i < done && (
+                <span className="ml-2 text-xs text-ink-secondary">
+                  {step.result}
+                </span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-viz-grid">
+        <div
+          className="h-full rounded-full bg-foreground transition-all duration-500"
+          style={{ width: `${(done / steps.length) * 100}%` }}
+        />
+      </div>
+      <button
+        type="button"
+        onClick={() => setDone(steps.length)}
+        className="self-end text-xs text-ink-muted underline underline-offset-4 hover:text-foreground"
+      >
+        スキップ
+      </button>
+    </section>
   );
 }
 

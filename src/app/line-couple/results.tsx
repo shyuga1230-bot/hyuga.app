@@ -7,6 +7,7 @@ import {
   type PairPersonality,
   type PersonPersonality,
 } from "@/lib/line/personality";
+import type { ParsedMessage } from "@/lib/line/parser";
 import { buildReport } from "@/lib/line/report";
 import type { Verdict } from "@/lib/line/verdict";
 import { fmtDate, fmtDuration, pct } from "@/lib/line/format";
@@ -99,6 +100,185 @@ function CopyButton({
         </div>
       )}
     </>
+  );
+}
+
+function truncate(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? flat.slice(0, max) + "…" : flat;
+}
+
+function fmtDateTime(ms: number): string {
+  const d = new Date(ms);
+  return `${fmtDate(ms)} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** ふたり史年表: 「初めて」の記録 */
+function FirstsTimeline({ stats }: { stats: PairStats }) {
+  const { firsts } = stats;
+  const items: { ts: number; title: string; detail: string }[] = [
+    {
+      ts: firsts.message.timestamp,
+      title: "記録上、最初のメッセージ",
+      detail: `${firsts.message.sender}「${truncate(firsts.message.text, 42)}」`,
+    },
+  ];
+  if (firsts.midnight) {
+    items.push({
+      ts: firsts.midnight.timestamp,
+      title: "初めて日付を越えた夜",
+      detail: `先に沈黙を破ったのは${firsts.midnight.sender}`,
+    });
+  }
+  if (firsts.call) {
+    items.push({
+      ts: firsts.call.timestamp,
+      title: "初めての通話",
+      detail:
+        firsts.call.durationSec > 0
+          ? `通話時間 ${fmtDuration(firsts.call.durationSec * 1000)}`
+          : "記念すべき第一声",
+    });
+  }
+  if (firsts.affection) {
+    items.push({
+      ts: firsts.affection.timestamp,
+      title: "初「好き」検出",
+      detail: `${firsts.affection.sender}「${truncate(firsts.affection.text, 42)}」`,
+    });
+  }
+  items.sort((x, y) => x.ts - y.ts);
+  return (
+    <ol className="flex flex-col">
+      {items.map((item, i) => (
+        <li key={item.title} className="relative flex gap-3 pb-4 last:pb-0">
+          <div className="flex flex-col items-center">
+            <span
+              aria-hidden
+              className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-series-a"
+            />
+            {i < items.length - 1 && (
+              <span aria-hidden className="mt-1 w-px flex-1 bg-viz-grid" />
+            )}
+          </div>
+          <div>
+            <div className="text-[11px] tabular-nums text-ink-muted">
+              {fmtDateTime(item.ts)}
+            </div>
+            <div className="text-sm font-medium text-foreground">
+              {item.title}
+            </div>
+            <div className="text-xs leading-5 text-ink-secondary">
+              {item.detail}
+            </div>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+const REPLAY_LIMIT = 40;
+
+/** 名場面リプレイ: 最も燃えた日の会話をLINE風に再生 */
+function BusiestDayReplay({
+  stats,
+  messages,
+}: {
+  stats: PairStats;
+  messages: ParsedMessage[];
+}) {
+  const dayMessages = useMemo(() => {
+    if (!stats.busiestDay) return [];
+    const [y, mo, d] = stats.busiestDay.label.split("/").map(Number);
+    return messages.filter((m) => {
+      if (m.sender !== stats.a.name && m.sender !== stats.b.name) return false;
+      const t = new Date(m.timestamp);
+      return (
+        t.getFullYear() === y && t.getMonth() + 1 === mo && t.getDate() === d
+      );
+    });
+  }, [stats, messages]);
+
+  const [shown, setShown] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const total = Math.min(dayMessages.length, REPLAY_LIMIT);
+
+  const startPlay = () => {
+    setPlaying(true);
+    // 動きを減らす設定なら一括表示
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setShown(total);
+    }
+  };
+
+  useEffect(() => {
+    if (!playing || shown >= total) return;
+    const t = setTimeout(() => setShown((n) => n + 1), 170);
+    return () => clearTimeout(t);
+  }, [playing, shown, total]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [shown]);
+
+  if (!stats.busiestDay || dayMessages.length === 0) return null;
+
+  return (
+    <ChartCard
+      title={`名場面リプレイ — ${stats.busiestDay.label}(${stats.busiestDay.count}通)`}
+    >
+      <p className="mb-3 text-xs leading-5 text-ink-secondary">
+        観測史上いちばん燃えた日の冒頭を再生します。
+      </p>
+      {!playing ? (
+        <button
+          type="button"
+          onClick={startPlay}
+          className="w-full rounded-xl border border-dashed border-viz-baseline py-8 text-sm font-medium text-foreground transition-colors hover:bg-black/5 dark:hover:bg-white/5"
+        >
+          ▶ 再生する
+        </button>
+      ) : (
+        <>
+          <div
+            ref={scrollRef}
+            className="flex max-h-80 flex-col gap-1.5 overflow-y-auto rounded-xl bg-black/[.03] p-3 dark:bg-white/5"
+          >
+            {dayMessages.slice(0, shown).map((m, i) => {
+              const isA = m.sender === stats.a.name;
+              return (
+                <div
+                  key={i}
+                  className={`flex ${isA ? "justify-start" : "justify-end"}`}
+                >
+                  <div
+                    className={`max-w-[75%] rounded-2xl px-3 py-1.5 text-xs leading-5 ${
+                      isA
+                        ? "rounded-bl-sm bg-series-a/15 text-foreground"
+                        : "rounded-br-sm bg-series-b/20 text-foreground"
+                    }`}
+                  >
+                    {truncate(m.text, 80)}
+                    <span className="ml-1.5 align-bottom text-[9px] text-ink-muted">
+                      {new Date(m.timestamp).getHours()}:
+                      {String(new Date(m.timestamp).getMinutes()).padStart(2, "0")}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {shown >= total && dayMessages.length > REPLAY_LIMIT && (
+            <p className="mt-2 text-center text-xs text-ink-muted">
+              …この日はこの後さらに{(stats.busiestDay.count - REPLAY_LIMIT).toLocaleString()}通続きました。続きは本物のLINEでどうぞ。
+            </p>
+          )}
+        </>
+      )}
+    </ChartCard>
   );
 }
 
@@ -208,10 +388,12 @@ function PersonalityBlock({
 export function Results({
   stats,
   verdict,
+  messages,
   onReset,
 }: {
   stats: PairStats;
   verdict: Verdict;
+  messages: ParsedMessage[];
   onReset: () => void;
 }) {
   const { a, b } = stats;
@@ -309,6 +491,10 @@ export function Results({
           ))}
         </div>
       </section>
+
+      <ChartCard title="ふたり史年表">
+        <FirstsTimeline stats={stats} />
+      </ChartCard>
 
       {/* スタットタイル */}
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -432,6 +618,8 @@ export function Results({
           )}
         </ChartCard>
       )}
+
+      <BusiestDayReplay stats={stats} messages={messages} />
 
       <ChartCard title="時間帯別メッセージ数">
         <div className="mb-3">

@@ -389,6 +389,18 @@ function conflictParagraph(
     );
   }
 
+  if (s.quarrelPattern !== null) {
+    parts.push(
+      `なお法医学的に言うと、謝罪ワードの発生は${s.quarrelPattern}に集中しています。その時間帯の会話には地雷が埋まっているということです。`,
+    );
+  }
+  if (s.makeupMedianMs !== null) {
+    parts.push(
+      s.makeupMedianMs < 30 * 60_000
+        ? `謝罪から相手の返信までの中央値は${fmtDuration(s.makeupMedianMs)}。仲直りの速さは一級品です。`
+        : `謝罪から相手の返信までは中央値${fmtDuration(s.makeupMedianMs)}。許すまでの「間」も、様式美として確立しています。`,
+    );
+  }
   const unsent = a.unsentCount + b.unsentCount;
   if (unsent > 5) {
     parts.push(`なお送信取消が${unsent}回。消された言葉の中にこそ、本当の議事録があります。`);

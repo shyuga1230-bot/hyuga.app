@@ -105,6 +105,17 @@ export interface PairStats {
   heatTrend: number | null;
   /** 二人ともよく使う「ふたり語」(汎用語を除く) */
   sharedPhrases: { token: string; count: number }[];
+  /** ふたり史年表: 「初めて」の記録 */
+  firsts: {
+    message: { timestamp: number; sender: string; text: string };
+    affection: { timestamp: number; sender: string; text: string } | null;
+    call: { timestamp: number; durationSec: number } | null;
+    midnight: { timestamp: number; sender: string } | null;
+  };
+  /** 謝罪から相手の返信(仲直り)までの中央値 */
+  makeupMedianMs: number | null;
+  /** ケンカ(謝罪)が発生しやすい曜日・時間帯(例: 「日曜日の深夜」) */
+  quarrelPattern: string | null;
   /** 観測史上最もメッセージが多かった日 */
   busiestDay: { label: string; count: number } | null;
   /** 連続でやりとりした最長日数 */
@@ -299,7 +310,11 @@ export function analyzePair(
   const dayCounts = new Map<string, number>();
   const dayNumbers = new Set<number>();
   const apologyTimestamps: number[] = [];
+  const apologyEvents: { ts: number; sender: string; index: number }[] = [];
   let maxCallSec = 0;
+  let firstAffection: PairStats["firsts"]["affection"] = null;
+  let firstCall: PairStats["firsts"]["call"] = null;
+  let firstMidnight: PairStats["firsts"]["midnight"] = null;
 
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
@@ -321,7 +336,12 @@ export function analyzePair(
         ).getTime() / 86_400_000,
       ),
     );
-    if (date.getHours() < 5) c.lateNight++;
+    if (date.getHours() < 5) {
+      c.lateNight++;
+      if (firstMidnight === null) {
+        firstMidnight = { timestamp: m.timestamp, sender: m.sender };
+      }
+    }
     if (date.getDay() === 0 || date.getDay() === 6) weekendCounts[m.sender]++;
     const ym = `${date.getFullYear() % 100}/${date.getMonth() + 1}`;
     const month = monthlyMap.get(ym) ?? { a: 0, b: 0 };
@@ -336,6 +356,12 @@ export function analyzePair(
       callCount++;
       totalCallSec += m.callDurationSec ?? 0;
       maxCallSec = Math.max(maxCallSec, m.callDurationSec ?? 0);
+      if (firstCall === null) {
+        firstCall = {
+          timestamp: m.timestamp,
+          durationSec: m.callDurationSec ?? 0,
+        };
+      }
     }
 
     if (m.kind === "text") {
@@ -346,10 +372,26 @@ export function analyzePair(
       if (HEART_RE.test(t)) c.heart++;
       if (LAUGH_RE.test(t)) c.laugh++;
       if (QUESTION_RE.test(t)) c.question++;
-      p.affectionCount += t.match(AFFECTION_RE) ? 1 : 0;
+      if (AFFECTION_RE.test(t)) {
+        p.affectionCount++;
+        if (firstAffection === null) {
+          firstAffection = {
+            timestamp: m.timestamp,
+            sender: m.sender,
+            text: m.text,
+          };
+        }
+      }
       if (APOLOGY_RE.test(t)) {
         p.apologyCount++;
         apologyTimestamps.push(m.timestamp);
+        if (
+          apologyEvents.length === 0 ||
+          m.timestamp - apologyEvents[apologyEvents.length - 1].ts >
+            2 * 86_400_000
+        ) {
+          apologyEvents.push({ ts: m.timestamp, sender: m.sender, index: i });
+        }
       }
       p.gratitudeCount += t.match(GRATITUDE_RE) ? 1 : 0;
       const tokens = extractTokens(t);
@@ -483,19 +525,55 @@ export function analyzePair(
     longestStreakDays = Math.max(longestStreakDays, streak);
   }
 
-  // 記録簿: 謝罪イベントの周期(2日以上空いたらイベントを区切る)
+  // 記録簿: 謝罪イベントの周期
   let quarrelIntervalDays: number | null = null;
-  const events: number[] = [];
-  for (const ts of apologyTimestamps) {
-    if (events.length === 0 || ts - events[events.length - 1] > 2 * 86_400_000) {
-      events.push(ts);
+  if (apologyEvents.length >= 3) {
+    const intervals = apologyEvents
+      .slice(1)
+      .map((e, i) => (e.ts - apologyEvents[i].ts) / 86_400_000);
+    quarrelIntervalDays = median(intervals);
+  }
+
+  // ケンカの法医学: 謝罪→相手の返信(仲直り)までの時間
+  const makeupTimes: number[] = [];
+  for (const event of apologyEvents) {
+    for (let j = event.index + 1; j < msgs.length; j++) {
+      const next = msgs[j];
+      if (next.timestamp - event.ts > 48 * 3600_000) break;
+      if (next.sender !== event.sender) {
+        makeupTimes.push(next.timestamp - event.ts);
+        break;
+      }
     }
   }
-  if (events.length >= 3) {
-    const intervals = events
-      .slice(1)
-      .map((ts, i) => (ts - events[i]) / 86_400_000);
-    quarrelIntervalDays = median(intervals);
+  const makeupMedianMs = median(makeupTimes);
+
+  // ケンカが発生しやすい曜日・時間帯
+  let quarrelPattern: string | null = null;
+  if (apologyTimestamps.length >= 5) {
+    const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
+    const BANDS: [string, (h: number) => boolean][] = [
+      ["深夜", (h) => h < 5],
+      ["朝", (h) => h >= 5 && h < 11],
+      ["昼", (h) => h >= 11 && h < 17],
+      ["夜", (h) => h >= 17],
+    ];
+    const wdCounts = new Array(7).fill(0);
+    const bandCounts = new Array(BANDS.length).fill(0);
+    for (const ts of apologyTimestamps) {
+      const d = new Date(ts);
+      wdCounts[d.getDay()]++;
+      bandCounts[BANDS.findIndex(([, test]) => test(d.getHours()))]++;
+    }
+    const topWd = wdCounts.indexOf(Math.max(...wdCounts));
+    const topBand = bandCounts.indexOf(Math.max(...bandCounts));
+    const wdShare = wdCounts[topWd] / apologyTimestamps.length;
+    const bandShare = bandCounts[topBand] / apologyTimestamps.length;
+    if (wdShare > 0.3 && bandShare > 0.35) {
+      quarrelPattern = `${WEEKDAYS[topWd]}曜日の${BANDS[topBand][0]}`;
+    } else if (bandShare > 0.45) {
+      quarrelPattern = BANDS[topBand][0];
+    }
   }
 
   const first = msgs[0].timestamp;
@@ -540,6 +618,18 @@ export function analyzePair(
     monthly,
     heatTrend,
     sharedPhrases,
+    firsts: {
+      message: {
+        timestamp: msgs[0].timestamp,
+        sender: msgs[0].sender,
+        text: msgs[0].text,
+      },
+      affection: firstAffection,
+      call: firstCall,
+      midnight: firstMidnight,
+    },
+    makeupMedianMs,
+    quarrelPattern,
     busiestDay,
     longestStreakDays,
     quarrelIntervalDays,
