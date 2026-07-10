@@ -3,11 +3,26 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  /* データ可視化トークン(CVD検証済み: 青×マゼンタ ΔE41+) */
+  --viz-surface: #fcfcfb;
+  --viz-series-a: #2a78d6;
+  --viz-series-b: #e87ba4;
+  --viz-ink-secondary: #52514e;
+  --viz-ink-muted: #898781;
+  --viz-grid: #e1e0d9;
+  --viz-baseline: #c3c2b7;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-viz-surface: var(--viz-surface);
+  --color-series-a: var(--viz-series-a);
+  --color-series-b: var(--viz-series-b);
+  --color-ink-secondary: var(--viz-ink-secondary);
+  --color-ink-muted: var(--viz-ink-muted);
+  --color-viz-grid: var(--viz-grid);
+  --color-viz-baseline: var(--viz-baseline);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -16,6 +31,13 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    --viz-surface: #1a1a19;
+    --viz-series-a: #3987e5;
+    --viz-series-b: #d55181;
+    --viz-ink-secondary: #c3c2b7;
+    --viz-ink-muted: #898781;
+    --viz-grid: #2c2c2a;
+    --viz-baseline: #383835;
   }
 }
 

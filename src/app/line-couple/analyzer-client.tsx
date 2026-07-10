@@ -1,0 +1,528 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { analyzePair, type PairStats } from "@/lib/line/analyze";
+import { generateDemoExport } from "@/lib/line/demo";
+import { fmtDuration, pct } from "@/lib/line/format";
+import {
+  parseLineExport,
+  type ParsedMessage,
+  type ParseResult,
+} from "@/lib/line/parser";
+import { judge, type Verdict } from "@/lib/line/verdict";
+import { Results } from "./results";
+
+const MIN_MESSAGES = 30;
+
+type Phase =
+  | { kind: "input" }
+  | { kind: "pick"; parsed: ParseResult; lineCount: number }
+  | {
+      kind: "analyzing";
+      stats: PairStats;
+      verdict: Verdict;
+      messages: ParsedMessage[];
+      lineCount: number;
+    }
+  | { kind: "result"; stats: PairStats; verdict: Verdict; messages: ParsedMessage[] };
+
+/** 内容を隠して構造だけ残す(数字・記号・タブ・日付/時刻の部品のみ表示) */
+function maskForDiagnostics(raw: string): string {
+  return raw
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .slice(0, 10)
+    .map((l) =>
+      l
+        .replace(/\t/g, " ⇥ ")
+        .replace(
+          /[^0-9\s:/.()\[\]\-,⇥年月日曜火水木金土午前後令和平成昭元RHSAMPamp]/g,
+          "●",
+        ),
+    )
+    .join("\n");
+}
+
+/** BOM/文字コードを考慮してファイルをテキスト化する */
+async function decodeFile(file: File): Promise<string | { zip: true }> {
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (head[0] === 0x50 && head[1] === 0x4b && head[2] <= 8) return { zip: true };
+  if (head[0] === 0xff && head[1] === 0xfe) {
+    return new TextDecoder("utf-16le").decode(await file.arrayBuffer());
+  }
+  if (head[0] === 0xfe && head[1] === 0xff) {
+    return new TextDecoder("utf-16be").decode(await file.arrayBuffer());
+  }
+  const text = await file.text();
+  // BOMなしUTF-16LEの推定: NUL文字が大量に混ざる
+  if ((text.slice(0, 2000).match(/\u0000/g) || []).length > 100) {
+    return new TextDecoder("utf-16le").decode(await file.arrayBuffer());
+  }
+  return text;
+}
+
+export default function AnalyzerClient() {
+  const [phase, setPhase] = useState<Phase>({ kind: "input" });
+  const [error, setError] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<string | null>(null);
+  const [pasted, setPasted] = useState("");
+  const [dragging, setDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const runAnalysis = useCallback(
+    (parsed: ParseResult, nameA: string, nameB: string, lineCount: number) => {
+      const stats = analyzePair(parsed.messages, nameA, nameB);
+      if (stats === null || stats.totalMessages < MIN_MESSAGES) {
+        setError(
+          `この2人の間のメッセージが${stats?.totalMessages ?? 0}通しかありません。偏見を持つには${MIN_MESSAGES}通以上必要です。`,
+        );
+        return;
+      }
+      setError(null);
+      setPhase({
+        kind: "analyzing",
+        stats,
+        verdict: judge(stats),
+        messages: parsed.messages,
+        lineCount,
+      });
+    },
+    [],
+  );
+
+  const handleText = useCallback(
+    (text: string) => {
+      const lineCount = text.split("\n").length;
+      let parsed: ParseResult;
+      try {
+        parsed = parseLineExport(text);
+      } catch {
+        setError("読み込みに失敗しました。LINEのトーク履歴(.txt)か確認してください。");
+        return;
+      }
+      if (parsed.messages.length < MIN_MESSAGES) {
+        if (parsed.messages.length === 0) {
+          setError(
+            "メッセージを1通も読み取れませんでした。このファイルの形式が未対応の可能性があります。",
+          );
+          setDiagnostic(maskForDiagnostics(text));
+        } else {
+          setError(
+            `読み取れたメッセージが${parsed.messages.length}通でした。偏見を持つには${MIN_MESSAGES}通以上のやりとりが必要です。もう少し会話を重ねてから来てください。`,
+          );
+        }
+        return;
+      }
+      setDiagnostic(null);
+      if (parsed.participants.length < 2) {
+        setError(
+          "発言している人が1人しかいません。相手の返事があるトーク履歴を読み込ませてください。それはそれで心配ですが。",
+        );
+        return;
+      }
+      setError(null);
+      if (parsed.participants.length === 2) {
+        runAnalysis(
+          parsed,
+          parsed.participants[0].name,
+          parsed.participants[1].name,
+          lineCount,
+        );
+      } else {
+        // グループトーク等: 2人選んでもらう
+        setPhase({ kind: "pick", parsed, lineCount });
+      }
+    },
+    [runAnalysis],
+  );
+
+  const handleFile = useCallback(
+    async (file: File) => {
+      try {
+        const decoded = await decodeFile(file);
+        if (typeof decoded !== "string") {
+          setError(
+            "このファイルは.zipのままです。展開(解凍)して、中の.txtファイルを読み込ませてください。",
+          );
+          return;
+        }
+        handleText(decoded);
+      } catch {
+        setError("ファイルを読み込めませんでした。");
+      }
+    },
+    [handleText],
+  );
+
+  const reset = useCallback(() => {
+    setPhase({ kind: "input" });
+    setError(null);
+    setDiagnostic(null);
+    setPasted("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, []);
+
+  return (
+    <div className="flex flex-col gap-6">
+      {phase.kind === "input" && (
+        <>
+          <section
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={(e) => {
+              // 子要素へ移っただけではハイライトを消さない
+              if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+              setDragging(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              const file = e.dataTransfer.files[0];
+              if (file) void handleFile(file);
+            }}
+            className={`flex flex-col items-center gap-4 rounded-2xl border-2 border-dashed p-10 text-center transition-colors ${
+              dragging
+                ? "border-series-a bg-series-a/5"
+                : "border-black/15 dark:border-white/20"
+            }`}
+          >
+            <div className="text-4xl" aria-hidden>
+              💬
+            </div>
+            <p className="text-sm text-ink-secondary">
+              LINEのトーク履歴(.txt)をここにドロップ
+            </p>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded-full bg-foreground px-6 py-2.5 text-sm font-medium text-background transition-opacity hover:opacity-80"
+            >
+              ファイルを選ぶ
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt,text/plain"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                // 同じファイルの再選択でもchangeが発火するように毎回リセット
+                e.target.value = "";
+                if (file) void handleFile(file);
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => handleText(generateDemoExport())}
+              className="text-xs text-ink-muted underline underline-offset-4 hover:text-foreground"
+            >
+              手元にない？サンプルデータで試す
+            </button>
+          </section>
+
+          <details className="rounded-xl border border-black/10 p-4 text-sm dark:border-white/10">
+            <summary className="cursor-pointer font-medium text-foreground">
+              テキストを直接貼り付ける
+            </summary>
+            <div className="mt-3 flex flex-col gap-3">
+              <textarea
+                value={pasted}
+                onChange={(e) => setPasted(e.target.value)}
+                rows={8}
+                placeholder={
+                  "[LINE] ○○とのトーク履歴\n2026/07/01(水)\n21:04\tひなた\tおつかれ〜\n21:05\tゆうた\tおつ"
+                }
+                className="w-full rounded-lg border border-black/10 bg-transparent p-3 font-mono text-xs text-foreground placeholder:text-ink-muted dark:border-white/15"
+              />
+              <button
+                type="button"
+                onClick={() => handleText(pasted)}
+                disabled={pasted.trim() === ""}
+                className="self-end rounded-full bg-foreground px-5 py-2 text-sm font-medium text-background transition-opacity hover:opacity-80 disabled:opacity-40"
+              >
+                これで診断する
+              </button>
+            </div>
+          </details>
+
+          <details className="rounded-xl border border-black/10 p-4 text-sm dark:border-white/10">
+            <summary className="cursor-pointer font-medium text-foreground">
+              トーク履歴の書き出し方
+            </summary>
+            <ol className="mt-3 list-decimal space-y-1.5 pl-5 leading-6 text-ink-secondary">
+              <li>スマホのLINEで診断したいトークを開く</li>
+              <li>右上のメニュー(≡)から「設定」を開く</li>
+              <li>「トーク履歴を送信」を選び、.txtファイルを保存する</li>
+              <li>そのファイルをこのページに読み込ませる</li>
+            </ol>
+            <p className="mt-3 text-xs leading-5 text-ink-muted">
+              ※トーク履歴はブラウザの中だけで処理されます。サーバーへの送信・保存は一切ありません。
+            </p>
+          </details>
+        </>
+      )}
+
+      {phase.kind === "pick" && (
+        <ParticipantPicker
+          parsed={phase.parsed}
+          onPick={(a, b) => runAnalysis(phase.parsed, a, b, phase.lineCount)}
+          onBack={reset}
+        />
+      )}
+
+      {phase.kind === "analyzing" && (
+        <AnalysisTheater
+          stats={phase.stats}
+          lineCount={phase.lineCount}
+          onDone={() =>
+            setPhase({
+              kind: "result",
+              stats: phase.stats,
+              verdict: phase.verdict,
+              messages: phase.messages,
+            })
+          }
+        />
+      )}
+
+      {phase.kind === "result" && (
+        <Results
+          stats={phase.stats}
+          verdict={phase.verdict}
+          messages={phase.messages}
+          onReset={reset}
+        />
+      )}
+
+      {error && (
+        <div
+          role="alert"
+          className="rounded-lg border border-red-600/30 bg-red-600/5 p-3 text-sm text-red-700 dark:text-red-400"
+        >
+          {error}
+          {diagnostic && (
+            <>
+              <pre className="mt-3 overflow-x-auto rounded-md bg-black/5 p-3 text-[11px] leading-relaxed dark:bg-white/10">
+                {diagnostic}
+              </pre>
+              <p className="mt-2 text-xs">
+                ↑ファイル冒頭の構造です(内容は●でマスク済み・どこにも送信されません)。この形式に対応できるので、スクショを開発者に送ってください。
+              </p>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 解析の進行を実測値つきで見せる演出。結果は計算済みで、見せ方だけ段階的 */
+function AnalysisTheater({
+  stats,
+  lineCount,
+  onDone,
+}: {
+  stats: PairStats;
+  lineCount: number;
+  onDone: () => void;
+}) {
+  const steps = useMemo(() => {
+    const { a, b } = stats;
+    const phrase = a.topPhrases[0] ?? b.topPhrases[0];
+    const phraseCount = a.topPhrases.length + b.topPhrases.length;
+    return [
+      {
+        label: "トーク履歴を解読しています",
+        result: `${lineCount.toLocaleString()}行を読み込みました`,
+        wait: 600,
+      },
+      {
+        label: "メッセージを数えています",
+        result: `${stats.totalMessages.toLocaleString()}通(${a.name} ${a.messageCount.toLocaleString()} / ${b.name} ${b.messageCount.toLocaleString()})`,
+        wait: 750,
+      },
+      {
+        label: "返信速度を計測しています",
+        result: `中央値 ${a.medianReplyMs !== null ? fmtDuration(a.medianReplyMs) : "—"} / ${b.medianReplyMs !== null ? fmtDuration(b.medianReplyMs) : "—"}`,
+        wait: 700,
+      },
+      {
+        label: "深夜の行動を調査しています",
+        result: `深夜率 ${pct((a.lateNightRate + b.lateNightRate) / 2)}を確認`,
+        wait: 650,
+      },
+      {
+        label: "口癖を採掘しています",
+        result: phrase
+          ? `「${phrase.token}」ほか${phraseCount}件を検出`
+          : "特筆すべき口癖は見つかりませんでした",
+        wait: 850,
+      },
+      {
+        label: "愛着スタイルを鑑定しています",
+        result: "鑑定完了",
+        wait: 700,
+      },
+      {
+        label: "偏見を醸成しています",
+        result: "十分に発酵しました",
+        wait: 1000,
+      },
+    ];
+  }, [stats, lineCount]);
+
+  const [done, setDone] = useState(0);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const finished = done >= steps.length;
+
+  useEffect(() => {
+    if (finished) {
+      timer.current = setTimeout(onDone, 500);
+    } else {
+      timer.current = setTimeout(() => setDone((d) => d + 1), steps[done].wait);
+    }
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+    };
+    // onDoneは親のsetPhaseで安定
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [done, finished, steps]);
+
+  return (
+    <section
+      className="flex flex-col gap-4 rounded-2xl border border-black/10 p-6 dark:border-white/10"
+      aria-live="polite"
+    >
+      <h2 className="text-base font-semibold text-foreground">解析中…</h2>
+      <ul className="flex flex-col gap-2.5">
+        {steps.slice(0, Math.min(done + 1, steps.length)).map((step, i) => (
+          <li key={step.label} className="flex items-start gap-2.5 text-sm">
+            <span
+              aria-hidden
+              className={
+                i < done
+                  ? "text-green-600 dark:text-green-400"
+                  : "inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-viz-baseline border-t-foreground"
+              }
+              style={{ marginTop: i < done ? 0 : 2 }}
+            >
+              {i < done ? "✓" : ""}
+            </span>
+            <span>
+              <span className="text-foreground">{step.label}</span>
+              {i < done && (
+                <span className="ml-2 text-xs text-ink-secondary">
+                  {step.result}
+                </span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-viz-grid">
+        <div
+          className="h-full rounded-full bg-foreground transition-all duration-500"
+          style={{ width: `${(done / steps.length) * 100}%` }}
+        />
+      </div>
+      <button
+        type="button"
+        onClick={() => setDone(steps.length)}
+        className="self-end text-xs text-ink-muted underline underline-offset-4 hover:text-foreground"
+      >
+        スキップ
+      </button>
+    </section>
+  );
+}
+
+function ParticipantPicker({
+  parsed,
+  onPick,
+  onBack,
+}: {
+  parsed: ParseResult;
+  onPick: (a: string, b: string) => void;
+  onBack: () => void;
+}) {
+  const [selected, setSelected] = useState<string[]>(() =>
+    parsed.participants.slice(0, 2).map((p) => p.name),
+  );
+  const totalMessages = useMemo(
+    () => parsed.participants.reduce((sum, p) => sum + p.messageCount, 0),
+    [parsed],
+  );
+
+  const toggle = (name: string) => {
+    setSelected((cur) =>
+      cur.includes(name)
+        ? cur.filter((n) => n !== name)
+        : cur.length < 2
+          ? [...cur, name]
+          : [cur[1], name],
+    );
+  };
+
+  return (
+    <section className="flex flex-col gap-4 rounded-2xl border border-black/10 p-6 dark:border-white/10">
+      <div>
+        <h2 className="text-lg font-semibold text-foreground">
+          参加者が{parsed.participants.length}人います
+        </h2>
+        <p className="mt-1 text-sm text-ink-secondary">
+          診断したい2人を選んでください。
+        </p>
+      </div>
+      <ul className="flex flex-col gap-2">
+        {parsed.participants.map((p) => {
+          const checked = selected.includes(p.name);
+          return (
+            <li key={p.name}>
+              <label
+                className={`flex cursor-pointer items-center justify-between rounded-lg border p-3 text-sm transition-colors ${
+                  checked
+                    ? "border-series-a bg-series-a/10"
+                    : "border-black/10 dark:border-white/15"
+                }`}
+              >
+                <span className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggle(p.name)}
+                    className="h-4 w-4"
+                  />
+                  <span className="font-medium text-foreground">{p.name}</span>
+                </span>
+                <span className="text-xs tabular-nums text-ink-muted">
+                  {p.messageCount.toLocaleString()}通 (
+                  {Math.round((p.messageCount / totalMessages) * 100)}%)
+                </span>
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="flex justify-between">
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-full border border-black/10 px-5 py-2 text-sm text-foreground hover:bg-black/5 dark:border-white/15 dark:hover:bg-white/10"
+        >
+          戻る
+        </button>
+        <button
+          type="button"
+          disabled={selected.length !== 2}
+          onClick={() => onPick(selected[0], selected[1])}
+          className="rounded-full bg-foreground px-5 py-2 text-sm font-medium text-background transition-opacity hover:opacity-80 disabled:opacity-40"
+        >
+          この2人で診断する
+        </button>
+      </div>
+    </section>
+  );
+}
