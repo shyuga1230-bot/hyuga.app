@@ -132,6 +132,163 @@ function personParagraph(
   return intro + frags.join("") + outro;
 }
 
+/* ---- 口癖と語彙 ---- */
+
+function vocabularyParagraph(s: PairStats): string {
+  const parts: string[] = [];
+  const phraseList = (p: PersonStats) =>
+    p.topPhrases
+      .map((x) => `「${x.token}」(${x.count}回)`)
+      .join("、");
+
+  if (s.a.topPhrases.length > 0) {
+    parts.push(`${s.a.name}が相手より突出して使う言葉は${phraseList(s.a)}。`);
+  }
+  if (s.b.topPhrases.length > 0) {
+    parts.push(`対する${s.b.name}の口癖は${phraseList(s.b)}。`);
+  }
+  if (parts.length === 2) {
+    parts.push(`口癖は本人だけが気付いていません。この診断の主な用途は指摘です。`);
+  } else if (parts.length === 0) {
+    parts.push(`ふたりとも言葉の偏りが少なく、口癖レーダーには引っかかりませんでした。文体まで空気を読むタイプです。`);
+  }
+
+  if (s.sharedPhrases.length > 0) {
+    const shared = s.sharedPhrases
+      .map((x) => `「${x.token}」(合計${x.count}回)`)
+      .join("、");
+    parts.push(
+      `そして、ふたりの間でだけ高頻度に流通している言葉が${shared}。辞書に載っていない語彙こそ、関係の年輪です。`,
+    );
+  } else {
+    parts.push(`一方で「ふたりだけの言葉」はまだ検出されず。これから育てる余地があります。`);
+  }
+  return parts.join("");
+}
+
+/* ---- 愛着スタイル(偏見) ---- */
+
+type Attachment = "安定型" | "不安型" | "回避型";
+
+function attachmentOf(p: PersonStats, partner: PersonStats): Attachment {
+  const starts = p.sessionStarts + partner.sessionStarts;
+  const startShare = starts > 0 ? p.sessionStarts / starts : 0.5;
+  const fast =
+    p.medianReplyMs !== null && p.medianReplyMs < 3 * 60_000 ? 1 : 0;
+  const anxious =
+    (p.doubleTextRate > 0.35 ? 1 : 0) +
+    (startShare > 0.58 ? 1 : 0) +
+    fast +
+    (p.lateNightRate > 0.2 ? 1 : 0);
+  const slow =
+    p.medianReplyMs !== null && p.medianReplyMs > 45 * 60_000 ? 1 : 0;
+  const avoidant =
+    slow +
+    (p.avgLength < 7 ? 1 : 0) +
+    (startShare < 0.42 ? 1 : 0) +
+    (p.emojiRate < 0.01 ? 1 : 0);
+  if (anxious >= 3 && anxious > avoidant) return "不安型";
+  if (avoidant >= 3 && avoidant > anxious) return "回避型";
+  return "安定型";
+}
+
+const ATTACHMENT_DESC: Record<Attachment, string> = {
+  不安型:
+    "つながっていない時間に耐性がなく、連投・即レス・深夜行動で接続を確認しにいくタイプ",
+  回避型:
+    "距離が詰まりすぎると一歩引く省エネ通信型。素っ気なさは防御であって無関心ではない",
+  安定型: "近すぎず遠すぎずの等速巡航型。相手の波にも動じない",
+};
+
+function attachmentParagraph(s: PairStats, seed: number): string {
+  const styleA = attachmentOf(s.a, s.b);
+  const styleB = attachmentOf(s.b, s.a);
+  const parts: string[] = [
+    `愛着スタイル風に断定すると、${s.a.name}は${styleA}(${ATTACHMENT_DESC[styleA]})、${s.b.name}は${styleB}(${ATTACHMENT_DESC[styleB]})。`,
+  ];
+  const pair = [styleA, styleB].sort().join("×");
+  if (pair === "不安型×回避型") {
+    parts.push(
+      `不安型が追うほど回避型は下がり、下がるほど追いたくなる。心理学の教科書が「よくある」と書く永久機関ですが、このトーク量を見る限り、ふたりは機関を回しながらちゃんと前に進んでいます。`,
+    );
+  } else if (pair === "不安型×不安型") {
+    parts.push(
+      `相互確認の応酬で安心を発電する共依存気味の構造。燃費は悪いですが、出力は最強です。`,
+    );
+  } else if (pair === "回避型×回避型") {
+    parts.push(
+      `お互い深追いしない者同士。世間はそれを冷めていると呼び、ふたりはそれを快適と呼びます。正しいのはふたりです。`,
+    );
+  } else if (pair === "安定型×安定型") {
+    parts.push(
+      pick(
+        [
+          `安定×安定の教科書ペア。ドラマ性はゼロですが、ドラマは観るものであって住むものではありません。`,
+          `どちらも地面が揺れないタイプ。地味に見えて、これが一番の贅沢です。`,
+        ],
+        seed,
+      ),
+    );
+  } else {
+    const stable = styleA === "安定型" ? s.a.name : s.b.name;
+    const other = styleA === "安定型" ? s.b.name : s.a.name;
+    parts.push(
+      `${stable}が地面役、${other}が天気役の分業制。天気は変わるものなので、地面は動じないのが仕事です。現状うまく機能しています。`,
+    );
+  }
+  parts.push(`※愛着理論の用語を拝借しただけの偏見です。`);
+  return parts.join("");
+}
+
+/* ---- ふたりの記録簿 ---- */
+
+function recordsParagraph(s: PairStats): string {
+  const parts: string[] = [];
+  if (s.busiestDay !== null) {
+    parts.push(
+      `観測史上、最も燃えた日は${s.busiestDay.label}の${s.busiestDay.count}通。この日に何があったかは、履歴だけが知っています。`,
+    );
+  }
+  if (s.longestStreakDays >= 14) {
+    parts.push(
+      `1日も途切れずやりとりした最長記録は${s.longestStreakDays}日連続。もはやライフラインです。`,
+    );
+  } else if (s.longestStreakDays >= 3) {
+    parts.push(`連続やりとり記録は${s.longestStreakDays}日。`);
+  }
+  if (s.quarrelIntervalDays !== null) {
+    parts.push(
+      `謝罪イベントはおよそ${Math.round(s.quarrelIntervalDays)}日周期で発生。ケンカではなく定期メンテナンスと呼びましょう。`,
+    );
+  }
+  const workA = s.a.workReplyMedianMs;
+  const workB = s.b.workReplyMedianMs;
+  const worker =
+    workA !== null && workA < 5 * 60_000
+      ? s.a
+      : workB !== null && workB < 5 * 60_000
+        ? s.b
+        : null;
+  if (worker !== null) {
+    const both =
+      workA !== null && workA < 5 * 60_000 && workB !== null && workB < 5 * 60_000;
+    parts.push(
+      both
+        ? `平日9〜18時の返信中央値はふたりとも5分未満。あの、お仕事は…?`
+        : `${worker.name}は平日9〜18時でも中央値${fmtDuration(worker.workReplyMedianMs!)}で返信。勤務中の生存確認、お疲れさまです。`,
+    );
+  }
+  if (s.maxCallSec >= 3600) {
+    parts.push(
+      `最長通話記録は${fmtDuration(s.maxCallSec * 1000)}。通話でそれは、もう一緒に住んだ方が早い。`,
+    );
+  }
+  if (parts.length === 0) {
+    parts.push(`特筆すべき異常値はなし。健全すぎて記録簿が白紙です。それはそれで記録的。`);
+  }
+  return parts.join("");
+}
+
 /* ---- ふたりの力学 ---- */
 
 function dynamicsParagraph(s: PairStats, personality: PairPersonality): string {
@@ -332,12 +489,24 @@ export function buildReport(
         body: personParagraph(s.b, personality.b, s),
       },
       {
+        heading: "口癖と語彙(偏見)",
+        body: vocabularyParagraph(s),
+      },
+      {
+        heading: "愛着スタイル(偏見)",
+        body: attachmentParagraph(s, seed),
+      },
+      {
         heading: "ふたりの力学",
         body: dynamicsParagraph(s, personality),
       },
       {
         heading: "ケンカをするなら(偏見)",
         body: conflictParagraph(s, personality, seed),
+      },
+      {
+        heading: "ふたりの記録簿",
+        body: recordsParagraph(s),
       },
       {
         heading: "一年後の予報(偏見)",

@@ -69,6 +69,10 @@ export interface PersonStats {
   weekendRate: number;
   /** いちばん発言が多い時間帯(0-23) */
   peakHour: number;
+  /** 相手と比べて特徴的によく使う言葉(口癖)上位 */
+  topPhrases: { token: string; count: number }[];
+  /** 平日9〜18時の返信中央値(勤務時間中の即レス度) */
+  workReplyMedianMs: number | null;
 }
 
 export interface PairStats {
@@ -99,6 +103,16 @@ export interface PairStats {
    * 1より大きければ加熱中、小さければ減速中。期間30日未満はnull
    */
   heatTrend: number | null;
+  /** 二人ともよく使う「ふたり語」(汎用語を除く) */
+  sharedPhrases: { token: string; count: number }[];
+  /** 観測史上最もメッセージが多かった日 */
+  busiestDay: { label: string; count: number } | null;
+  /** 連続でやりとりした最長日数 */
+  longestStreakDays: number;
+  /** 謝罪イベント(2日以上空けてクラスタ化)の間隔中央値(日)。3回未満はnull */
+  quarrelIntervalDays: number | null;
+  /** 最長の1回の通話(秒) */
+  maxCallSec: number;
 }
 
 const SESSION_GAP_MS = 6 * 3600_000;
@@ -177,8 +191,42 @@ function emptyPerson(name: string): PersonStats {
     hourEntropy: 0,
     weekendRate: 0,
     peakHour: 12,
+    topPhrases: [],
+    workReplyMedianMs: null,
   };
 }
+
+// 口癖抽出: 形態素解析なしの簡易トークン化。
+// 記号・数字・絵文字で区切り、2〜8文字の短い言い回しを数える。
+// 全角記号は見た目で区別しづらいのでコードポイントで明示する
+const TOKEN_SPLIT = new RegExp(
+  "[\\s、。,.・…~!?:;\"'/\\\\*+=<>@#$%^&|{}\\[\\]()「」『』【】0-9０-９" +
+    "\\u30FC\\uFF70" + // ー ｰ (長音)
+    "\\uFF01\\uFF1F\\uFF5E\\u301C" + // ！ ？ ~ 〜
+    "\\uFF08\\uFF09\\uFF1A\\uFF1B\\uFF0C\\uFF0E" + // () : ; , .
+    "]+",
+  "u",
+);
+
+function extractTokens(text: string): string[] {
+  const cleaned = text
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/\p{Extended_Pictographic}/gu, " ");
+  const tokens = cleaned
+    .split(TOKEN_SPLIT)
+    .filter((t) => t.length >= 2 && t.length <= 8);
+  return tokens;
+}
+
+// 「ふたり語」から除外する、どのカップルでも頻出する汎用語
+const GENERIC_TOKENS = new Set([
+  "うん", "そう", "はい", "了解", "りょ", "おけ", "おっけ", "ok", "OK",
+  "わかった", "なるほど", "たしかに", "確かに", "そだね", "それな",
+  "おはよう", "おはよ", "おやすみ", "おつかれ", "お疲れ", "ありがとう",
+  "ありがと", "ごめん", "です", "ます", "した", "から", "けど", "って",
+  "だから", "でも", "まじ", "ほんと", "本当", "今日", "明日", "昨日",
+  "そして", "あと", "なんか", "ちょっと", "やっぱ", "まあ", "うける",
+]);
 
 /** 時間帯分布の正規化エントロピー(0=一極集中, 1=完全均等) */
 function normalizedEntropy(hist: number[]): number {
@@ -243,6 +291,15 @@ export function analyzePair(
   const doubleTexts: Record<string, number> = { [nameA]: 0, [nameB]: 0 };
   const weekendCounts: Record<string, number> = { [nameA]: 0, [nameB]: 0 };
   const monthlyMap = new Map<string, { a: number; b: number }>();
+  const tokenMaps: Record<string, Map<string, number>> = {
+    [nameA]: new Map(),
+    [nameB]: new Map(),
+  };
+  const workReplyTimes: Record<string, number[]> = { [nameA]: [], [nameB]: [] };
+  const dayCounts = new Map<string, number>();
+  const dayNumbers = new Set<number>();
+  const apologyTimestamps: number[] = [];
+  let maxCallSec = 0;
 
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
@@ -252,8 +309,17 @@ export function analyzePair(
 
     const date = new Date(m.timestamp);
     p.hourHistogram[date.getHours()]++;
-    activeDaySet.add(
-      `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`,
+    const dayKey = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+    activeDaySet.add(dayKey);
+    dayCounts.set(dayKey, (dayCounts.get(dayKey) ?? 0) + 1);
+    dayNumbers.add(
+      Math.floor(
+        new Date(
+          date.getFullYear(),
+          date.getMonth(),
+          date.getDate(),
+        ).getTime() / 86_400_000,
+      ),
     );
     if (date.getHours() < 5) c.lateNight++;
     if (date.getDay() === 0 || date.getDay() === 6) weekendCounts[m.sender]++;
@@ -269,6 +335,7 @@ export function analyzePair(
     if (m.kind === "call") {
       callCount++;
       totalCallSec += m.callDurationSec ?? 0;
+      maxCallSec = Math.max(maxCallSec, m.callDurationSec ?? 0);
     }
 
     if (m.kind === "text") {
@@ -280,8 +347,16 @@ export function analyzePair(
       if (LAUGH_RE.test(t)) c.laugh++;
       if (QUESTION_RE.test(t)) c.question++;
       p.affectionCount += t.match(AFFECTION_RE) ? 1 : 0;
-      p.apologyCount += t.match(APOLOGY_RE) ? 1 : 0;
+      if (APOLOGY_RE.test(t)) {
+        p.apologyCount++;
+        apologyTimestamps.push(m.timestamp);
+      }
       p.gratitudeCount += t.match(GRATITUDE_RE) ? 1 : 0;
+      const tokens = extractTokens(t);
+      const map = tokenMaps[m.sender];
+      for (const token of tokens) {
+        map.set(token, (map.get(token) ?? 0) + 1);
+      }
       if (CONCRETE_RE.test(t)) c.concrete++;
       if (HEDGE_RE.test(t)) c.hedge++;
       if (EMOTION_RE.test(t)) c.emotion++;
@@ -311,6 +386,11 @@ export function analyzePair(
     } else if (prev.sender !== m.sender && gap >= 0) {
       // セッション内で相手に返信した(負の間隔は壊れた入力なので除外)
       replyTimes[m.sender].push(gap);
+      // 平日9〜18時の返信は勤務中即レス度として別集計
+      const d = new Date(m.timestamp);
+      if (d.getDay() >= 1 && d.getDay() <= 5 && d.getHours() >= 9 && d.getHours() < 18) {
+        workReplyTimes[m.sender].push(gap);
+      }
     } else if (prev.sender === m.sender && gap >= 0 && gap < 30 * 60_000) {
       // 相手の返事を待たない連投
       doubleTexts[m.sender]++;
@@ -345,6 +425,77 @@ export function analyzePair(
     p.weekendRate = n > 0 ? weekendCounts[name] / n : 0;
     p.hourEntropy = normalizedEntropy(p.hourHistogram);
     p.peakHour = p.hourHistogram.indexOf(Math.max(...p.hourHistogram));
+    p.workReplyMedianMs = median(workReplyTimes[name]);
+  }
+
+  // 口癖: 相手との使用比(ログオッズ)×頻度で「その人らしい」言葉を選ぶ
+  for (const [name, other] of [
+    [nameA, nameB],
+    [nameB, nameA],
+  ] as const) {
+    const mine = tokenMaps[name];
+    const theirs = tokenMaps[other];
+    persons[name].topPhrases = [...mine.entries()]
+      .filter(([, cnt]) => cnt >= 8)
+      .map(([token, cnt]) => ({
+        token,
+        count: cnt,
+        score:
+          Math.log((cnt + 1) / ((theirs.get(token) ?? 0) + 1)) *
+          Math.log(1 + cnt),
+      }))
+      .filter((x) => x.score > 0.8)
+      .sort((x, y) => y.score - x.score)
+      .slice(0, 3)
+      .map(({ token, count }) => ({ token, count }));
+  }
+
+  // ふたり語: 双方がよく使い、かつ汎用語でないもの
+  const sharedPhrases = [...tokenMaps[nameA].entries()]
+    .filter(([token, cnt]) => {
+      const otherCnt = tokenMaps[nameB].get(token) ?? 0;
+      return cnt >= 10 && otherCnt >= 10 && !GENERIC_TOKENS.has(token);
+    })
+    .map(([token, cnt]) => ({
+      token,
+      count: cnt + (tokenMaps[nameB].get(token) ?? 0),
+      min: Math.min(cnt, tokenMaps[nameB].get(token) ?? 0),
+    }))
+    .sort((x, y) => y.min - x.min)
+    .slice(0, 3)
+    .map(({ token, count }) => ({ token, count }));
+
+  // 記録簿: 最も燃えた日
+  let busiestDay: { label: string; count: number } | null = null;
+  for (const [key, count] of dayCounts) {
+    if (busiestDay === null || count > busiestDay.count) {
+      const [y, mo, d] = key.split("-").map(Number);
+      busiestDay = { label: `${y}/${mo + 1}/${d}`, count };
+    }
+  }
+
+  // 記録簿: 連続会話日数
+  const sortedDays = [...dayNumbers].sort((x, y) => x - y);
+  let longestStreakDays = sortedDays.length > 0 ? 1 : 0;
+  let streak = 1;
+  for (let i = 1; i < sortedDays.length; i++) {
+    streak = sortedDays[i] === sortedDays[i - 1] + 1 ? streak + 1 : 1;
+    longestStreakDays = Math.max(longestStreakDays, streak);
+  }
+
+  // 記録簿: 謝罪イベントの周期(2日以上空いたらイベントを区切る)
+  let quarrelIntervalDays: number | null = null;
+  const events: number[] = [];
+  for (const ts of apologyTimestamps) {
+    if (events.length === 0 || ts - events[events.length - 1] > 2 * 86_400_000) {
+      events.push(ts);
+    }
+  }
+  if (events.length >= 3) {
+    const intervals = events
+      .slice(1)
+      .map((ts, i) => (ts - events[i]) / 86_400_000);
+    quarrelIntervalDays = median(intervals);
   }
 
   const first = msgs[0].timestamp;
@@ -388,5 +539,10 @@ export function analyzePair(
     aShare: persons[nameA].messageCount / msgs.length,
     monthly,
     heatTrend,
+    sharedPhrases,
+    busiestDay,
+    longestStreakDays,
+    quarrelIntervalDays,
+    maxCallSec,
   };
 }
