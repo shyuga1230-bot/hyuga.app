@@ -5,18 +5,19 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# gh-pagesブランチへ公開する方式。
-# ブランチが作られるとGitHub Pagesが自動で有効になるため、
-# ワークフロートークンにPages管理権限が不要
+# Pages設定のソースが「Deploy from a branch (gh-pages)」でも
+# 「GitHub Actions」でも公開できるよう、両方式で配信する
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,3 +35,20 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./out
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  # Pagesのソースが「GitHub Actions」の場合の配信経路。
+  # ソースがブランチ設定の場合このジョブは失敗するが、
+  # その場合はbuildジョブのgh-pages公開が有効なので無視してよい
+  deploy-workflow-source:
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
