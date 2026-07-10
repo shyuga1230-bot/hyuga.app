@@ -14,9 +14,43 @@ type Phase =
   | { kind: "pick"; parsed: ParseResult }
   | { kind: "result"; stats: PairStats; verdict: Verdict };
 
+/** 内容を隠して構造だけ残す(数字・記号・タブ・日付/時刻の部品のみ表示) */
+function maskForDiagnostics(raw: string): string {
+  return raw
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .slice(0, 10)
+    .map((l) =>
+      l
+        .replace(/\t/g, " ⇥ ")
+        .replace(/[^0-9\s:/.()\[\]\-,⇥年月日曜火水木金土午前後AMPamp]/g, "●"),
+    )
+    .join("\n");
+}
+
+/** BOM/文字コードを考慮してファイルをテキスト化する */
+async function decodeFile(file: File): Promise<string | { zip: true }> {
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (head[0] === 0x50 && head[1] === 0x4b && head[2] <= 8) return { zip: true };
+  if (head[0] === 0xff && head[1] === 0xfe) {
+    return new TextDecoder("utf-16le").decode(await file.arrayBuffer());
+  }
+  if (head[0] === 0xfe && head[1] === 0xff) {
+    return new TextDecoder("utf-16be").decode(await file.arrayBuffer());
+  }
+  const text = await file.text();
+  // BOMなしUTF-16LEの推定: NUL文字が大量に混ざる
+  if ((text.slice(0, 2000).match(/\u0000/g) || []).length > 100) {
+    return new TextDecoder("utf-16le").decode(await file.arrayBuffer());
+  }
+  return text;
+}
+
 export default function AnalyzerClient() {
   const [phase, setPhase] = useState<Phase>({ kind: "input" });
   const [error, setError] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<string | null>(null);
   const [pasted, setPasted] = useState("");
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -46,13 +80,19 @@ export default function AnalyzerClient() {
         return;
       }
       if (parsed.messages.length < MIN_MESSAGES) {
-        setError(
-          parsed.messages.length === 0
-            ? "メッセージを1通も読み取れませんでした。LINEアプリの「トーク履歴を送信」で書き出した.txtファイルを読み込ませてください。"
-            : `読み取れたメッセージが${parsed.messages.length}通でした。偏見を持つには${MIN_MESSAGES}通以上のやりとりが必要です。もう少し会話を重ねてから来てください。`,
-        );
+        if (parsed.messages.length === 0) {
+          setError(
+            "メッセージを1通も読み取れませんでした。このファイルの形式が未対応の可能性があります。",
+          );
+          setDiagnostic(maskForDiagnostics(text));
+        } else {
+          setError(
+            `読み取れたメッセージが${parsed.messages.length}通でした。偏見を持つには${MIN_MESSAGES}通以上のやりとりが必要です。もう少し会話を重ねてから来てください。`,
+          );
+        }
         return;
       }
+      setDiagnostic(null);
       if (parsed.participants.length < 2) {
         setError(
           "発言している人が1人しかいません。相手の返事があるトーク履歴を読み込ませてください。それはそれで心配ですが。",
@@ -77,7 +117,14 @@ export default function AnalyzerClient() {
   const handleFile = useCallback(
     async (file: File) => {
       try {
-        handleText(await file.text());
+        const decoded = await decodeFile(file);
+        if (typeof decoded !== "string") {
+          setError(
+            "このファイルは.zipのままです。展開(解凍)して、中の.txtファイルを読み込ませてください。",
+          );
+          return;
+        }
+        handleText(decoded);
       } catch {
         setError("ファイルを読み込めませんでした。");
       }
@@ -88,6 +135,7 @@ export default function AnalyzerClient() {
   const reset = useCallback(() => {
     setPhase({ kind: "input" });
     setError(null);
+    setDiagnostic(null);
     setPasted("");
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
@@ -211,12 +259,22 @@ export default function AnalyzerClient() {
       )}
 
       {error && (
-        <p
+        <div
           role="alert"
           className="rounded-lg border border-red-600/30 bg-red-600/5 p-3 text-sm text-red-700 dark:text-red-400"
         >
           {error}
-        </p>
+          {diagnostic && (
+            <>
+              <pre className="mt-3 overflow-x-auto rounded-md bg-black/5 p-3 text-[11px] leading-relaxed dark:bg-white/10">
+                {diagnostic}
+              </pre>
+              <p className="mt-2 text-xs">
+                ↑ファイル冒頭の構造です(内容は●でマスク済み・どこにも送信されません)。この形式に対応できるので、スクショを開発者に送ってください。
+              </p>
+            </>
+          )}
+        </div>
       )}
     </div>
   );
