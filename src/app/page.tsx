@@ -29,6 +29,23 @@ export default function Home() {
             診断してみる →
           </span>
         </Link>
+        <Link
+          href="/interior-yano"
+          className="group w-full rounded-2xl border border-black/10 bg-white p-6 text-left transition-colors hover:border-black/25 dark:border-white/10 dark:bg-zinc-950 dark:hover:border-white/25"
+        >
+          <div className="text-3xl" aria-hidden>
+            🚪
+          </div>
+          <h2 className="mt-3 text-xl font-semibold text-foreground">
+            インテリア矢野ふすま本店
+          </h2>
+          <p className="mt-2 text-sm leading-6 text-ink-secondary">
+            ふすま・障子・網戸・畳の張替えから内装リフォームまで。和室まわりの専門店の紹介ページです。
+          </p>
+          <span className="mt-4 inline-block text-sm font-medium text-foreground group-hover:underline">
+            お店のページを見る →
+          </span>
+        </Link>
       </main>
     </div>
   );
