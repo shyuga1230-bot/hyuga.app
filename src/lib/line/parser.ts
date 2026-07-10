@@ -43,9 +43,12 @@ export interface ParseResult {
   skippedLines: number;
 }
 
+// 日付ヘッダーは必ず曜日を伴う(全エクスポート形式共通)。
+// 曜日を必須にすることで、メッセージ本文中の裸の日付行(「2026/02/14」等)を
+// 誤ってヘッダー扱いしない。
 const DATE_PATTERNS: RegExp[] = [
   // 2024/01/05(金) / 2024/1/5(Fri) / 2024.01.05(金)
-  /^(\d{4})[/.年](\d{1,2})[/.月](\d{1,2})日?\s*(?:\([^)]+\)|（[^）]+）)?\s*$/,
+  /^(\d{4})[/.年](\d{1,2})[/.月](\d{1,2})日?\s*(?:\([^)]+\)|（[^）]+）)\s*$/,
   // 2024.01.05 金曜日
   /^(\d{4})[/.](\d{1,2})[/.](\d{1,2})\s+\S+曜日\s*$/,
   // Fri, 1/5/2024 (英語版: 月/日/年)
@@ -85,11 +88,13 @@ const KIND_RULES: KindRule[] = [
       /^\[(アルバム|ノート|位置情報|連絡先|GIF|Album|Note|Location|Contact)\]/.test(t),
   },
   {
-    kind: "missed-call",
-    test: (t) => /^☎\s*(不在着信|応答なし|Missed call|No answer)/.test(t),
+    // 通話時間つきの☎行だけが成立した通話。
+    // 不在着信・キャンセル・応答なし等はすべて missed-call
+    kind: "call",
+    test: (t) => /^☎/.test(t) && /\d+:\d{2}/.test(t),
   },
   {
-    kind: "call",
+    kind: "missed-call",
     test: (t) => /^☎/.test(t),
   },
   {
@@ -154,6 +159,8 @@ export function parseLineExport(raw: string): ParseResult {
   const messages: ParsedMessage[] = [];
   let skippedLines = 0;
   let last: ParsedMessage | null = null;
+  // iOS形式の引用符つき複数行メッセージ("で開いて後続行の"で閉じる)の内側か
+  let inQuote = false;
 
   for (const rawLine of lines) {
     // 複数行メッセージの継続行を先に判定したいので、trimは判定ごとに行う
@@ -183,9 +190,12 @@ export function parseLineExport(raw: string): ParseResult {
     }
 
     const dateMs = tryParseDateLine(trimmed);
-    if (dateMs !== null) {
+    // 日付ヘッダーは時系列で単調増加する。過去に戻る日付らしき行は
+    // メッセージ本文の一部とみなす(誤検出でタイムスタンプが壊れるのを防ぐ)
+    if (dateMs !== null && (currentDate === null || dateMs >= currentDate)) {
       currentDate = dateMs;
       last = null;
+      inQuote = false;
       continue;
     }
 
@@ -196,7 +206,15 @@ export function parseLineExport(raw: string): ParseResult {
       if (hour <= 23 && Number(minStr) <= 59) {
         const timestamp =
           currentDate + hour * 3600_000 + Number(minStr) * 60_000;
-        const text = body.replace(/^"|"$/g, "");
+        // iOSは複数行メッセージを"で囲む(単一行は囲まない)。
+        // 開き"だけの行は引用ブロックの開始。"で開いて"で閉じる
+        // 単一行は本人が打った引用符なのでそのまま残す
+        let text = body;
+        inQuote = false;
+        if (text.startsWith('"') && !(text.length > 1 && text.endsWith('"'))) {
+          text = text.slice(1);
+          inQuote = true;
+        }
         const kind = classify(text);
         const msg: ParsedMessage = {
           timestamp,
@@ -216,12 +234,19 @@ export function parseLineExport(raw: string): ParseResult {
     if (SYSTEM_LINE.test(line) && currentDate !== null) {
       // 「12:34\t○○が参加しました」等のシステム行。分析対象外
       last = null;
+      inQuote = false;
       continue;
     }
 
     if (last !== null) {
-      // タイムスタンプなし行 = 直前メッセージの続き
-      last.text += "\n" + line.replace(/"$/g, "");
+      // タイムスタンプなし行 = 直前メッセージの続き。
+      // 引用ブロック内なら閉じ"を取り除く
+      let cont = line;
+      if (inQuote && cont.endsWith('"')) {
+        cont = cont.slice(0, -1);
+        inQuote = false;
+      }
+      last.text += "\n" + cont;
       continue;
     }
 

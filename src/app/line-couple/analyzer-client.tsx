@@ -24,8 +24,10 @@ export default function AnalyzerClient() {
   const runAnalysis = useCallback(
     (parsed: ParseResult, nameA: string, nameB: string) => {
       const stats = analyzePair(parsed.messages, nameA, nameB);
-      if (stats === null) {
-        setError("この2人のメッセージが少なすぎて偏見が持てません。");
+      if (stats === null || stats.totalMessages < MIN_MESSAGES) {
+        setError(
+          `この2人の間のメッセージが${stats?.totalMessages ?? 0}通しかありません。偏見を持つには${MIN_MESSAGES}通以上必要です。`,
+        );
         return;
       }
       setError(null);
@@ -45,7 +47,15 @@ export default function AnalyzerClient() {
       }
       if (parsed.messages.length < MIN_MESSAGES) {
         setError(
-          `解析できたメッセージが${parsed.messages.length}通しかありません。LINEアプリの「トーク履歴を送信」で書き出した.txtファイルを読み込ませてください。`,
+          parsed.messages.length === 0
+            ? "メッセージを1通も読み取れませんでした。LINEアプリの「トーク履歴を送信」で書き出した.txtファイルを読み込ませてください。"
+            : `読み取れたメッセージが${parsed.messages.length}通でした。偏見を持つには${MIN_MESSAGES}通以上のやりとりが必要です。もう少し会話を重ねてから来てください。`,
+        );
+        return;
+      }
+      if (parsed.participants.length < 2) {
+        setError(
+          "発言している人が1人しかいません。相手の返事があるトーク履歴を読み込ませてください。それはそれで心配ですが。",
         );
         return;
       }
@@ -91,7 +101,11 @@ export default function AnalyzerClient() {
               e.preventDefault();
               setDragging(true);
             }}
-            onDragLeave={() => setDragging(false)}
+            onDragLeave={(e) => {
+              // 子要素へ移っただけではハイライトを消さない
+              if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+              setDragging(false);
+            }}
             onDrop={(e) => {
               e.preventDefault();
               setDragging(false);
@@ -124,6 +138,8 @@ export default function AnalyzerClient() {
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0];
+                // 同じファイルの再選択でもchangeが発火するように毎回リセット
+                e.target.value = "";
                 if (file) void handleFile(file);
               }}
             />

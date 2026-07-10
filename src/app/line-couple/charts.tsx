@@ -64,6 +64,9 @@ export function ShareBar({
 }) {
   const total = aCount + bCount;
   const aPct = total > 0 ? (aCount / total) * 100 : 50;
+  // ラベルの合計が100%になるように片側だけ丸める
+  const aPctLabel = Math.round(aPct);
+  const bPctLabel = 100 - aPctLabel;
   return (
     <div>
       <div className="flex h-6 w-full gap-[2px] overflow-hidden rounded-md">
@@ -79,10 +82,10 @@ export function ShareBar({
       </div>
       <div className="mt-2 flex justify-between text-xs text-ink-secondary">
         <span>
-          {aName} {aCount.toLocaleString()}通 ({Math.round(aPct)}%)
+          {aName} {aCount.toLocaleString()}通 ({aPctLabel}%)
         </span>
         <span>
-          {bName} {bCount.toLocaleString()}通 ({Math.round(100 - aPct)}%)
+          {bName} {bCount.toLocaleString()}通 ({bPctLabel}%)
         </span>
       </div>
     </div>
@@ -118,7 +121,11 @@ export function CompareBars({ metrics }: { metrics: CompareMetric[] }) {
                     <div
                       className={`h-full rounded-r ${color}`}
                       style={{
-                        width: `${Math.max((value / max) * 100, 1)}%`,
+                        // 0(データなし)はバーを描かない。それ以外は最低1%は見せる
+                        width:
+                          value <= 0
+                            ? 0
+                            : `${Math.max((value / max) * 100, 1)}%`,
                       }}
                     />
                   </div>
@@ -204,7 +211,11 @@ export function BalanceMeter({
         <div
           className="absolute top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-viz-surface bg-foreground shadow"
           style={{ left: `${pos}%` }}
-          title={`パワーバランス: ${clamped > 0 ? bName : aName}側が尽くし気味`}
+          title={
+            Math.abs(clamped) < 5
+              ? "パワーバランス: ほぼ対等"
+              : `パワーバランス: ${clamped > 0 ? bName : aName}側が尽くし気味`
+          }
         />
       </div>
       <div className="mt-2 flex justify-between text-xs text-ink-secondary">

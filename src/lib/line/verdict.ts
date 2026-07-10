@@ -169,7 +169,7 @@ const ARCHETYPES: Archetype[] = [
       return callsPerWeek > 2 ? 50 + Math.min(callsPerWeek * 5, 40) : 0;
     },
     comment: (s) =>
-      `通話${s.callCount}回、合計${Math.round(s.totalCallSec / 3600)}時間。テキストは「電話していい?」を送るためだけに存在しています。声を聞かないと不安になるタイプ。パケットより通話時間を気にする、古き良き恋人たちです。`,
+      `通話${s.callCount}回、合計${fmtDuration(s.totalCallSec * 1000)}。テキストは「電話していい?」を送るためだけに存在しています。声を聞かないと不安になるタイプ。パケットより通話時間を気にする、古き良き恋人たちです。`,
   },
 ];
 

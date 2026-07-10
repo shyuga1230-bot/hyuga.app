@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import type { PairStats } from "@/lib/line/analyze";
 import type { Verdict } from "@/lib/line/verdict";
 import { fmtDate, fmtDuration, pct } from "@/lib/line/format";
@@ -10,6 +11,45 @@ import {
   ShareBar,
   StatTile,
 } from "./charts";
+
+function CopyButton({ text }: { text: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const copy = async () => {
+    try {
+      if (!navigator.clipboard) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState("idle"), 2000);
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={() => void copy()}
+      aria-live="polite"
+      className="rounded-full border border-black/10 px-5 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-black/5 dark:border-white/15 dark:hover:bg-white/10"
+    >
+      {state === "copied"
+        ? "コピーしました ✓"
+        : state === "failed"
+          ? "コピーできませんでした"
+          : "結果をコピー"}
+    </button>
+  );
+}
 
 function buildShareText(stats: PairStats, verdict: Verdict): string {
   return [
@@ -35,10 +75,13 @@ export function Results({
   const compareMetrics = [
     {
       label: "返信速度の中央値(短いほど即レス)",
+      // nullは「返信実績なし」= バーを描かない(0にすると最速に見えてしまう)
       aValue: a.medianReplyMs ?? 0,
       bValue: b.medianReplyMs ?? 0,
-      aDisplay: a.medianReplyMs !== null ? fmtDuration(a.medianReplyMs) : "—",
-      bDisplay: b.medianReplyMs !== null ? fmtDuration(b.medianReplyMs) : "—",
+      aDisplay:
+        a.medianReplyMs !== null ? fmtDuration(a.medianReplyMs) : "返信なし",
+      bDisplay:
+        b.medianReplyMs !== null ? fmtDuration(b.medianReplyMs) : "返信なし",
     },
     {
       label: "平均文字数",
@@ -192,15 +235,7 @@ export function Results({
       )}
 
       <div className="flex flex-wrap justify-center gap-3">
-        <button
-          type="button"
-          onClick={() => {
-            navigator.clipboard?.writeText(buildShareText(stats, verdict));
-          }}
-          className="rounded-full border border-black/10 px-5 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-black/5 dark:border-white/15 dark:hover:bg-white/10"
-        >
-          結果をコピー
-        </button>
+        <CopyButton text={buildShareText(stats, verdict)} />
         <button
           type="button"
           onClick={onReset}

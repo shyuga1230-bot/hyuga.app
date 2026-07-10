@@ -70,8 +70,15 @@ const SESSION_GAP_MS = 6 * 3600_000;
 
 const EMOJI_RE = /\p{Extended_Pictographic}/u;
 const HEART_RE = /[❤🧡💛💚💙💜🖤🤍🤎💕💞💓💗💖💘💝♥️😍🥰😘]/u;
-const LAUGH_RE = /(ｗ|w{2,}|笑|草|ワロタ|www)/;
+// 「まじかw」「w」単体も笑いとして拾い、"windows"等の英単語中のwは拾わない
+const LAUGH_RE = /(ｗ|笑|草|ワロタ)|(?:^|[^0-9A-Za-z])w+(?![0-9A-Za-z])/;
 const QUESTION_RE = /[?？]/;
+const URL_RE = /https?:\/\/\S+/g;
+
+/** URLを除いた本文(URL内のwwwや?が笑い・質問判定を汚染しないように) */
+function textForMatching(text: string): string {
+  return text.replace(URL_RE, "");
+}
 const AFFECTION_RE =
   /(好き|大好き|だいすき|すき|愛してる|あいしてる|会いたい|あいたい|love you|luv u)/i;
 const APOLOGY_RE = /(ごめん|ゴメン|すまん|すみません|申し訳|sorry|my bad)/i;
@@ -177,30 +184,31 @@ export function analyzePair(
     if (m.kind === "text") {
       c.textCount++;
       p.charCount += m.text.length;
-      if (EMOJI_RE.test(m.text)) c.emoji++;
-      if (HEART_RE.test(m.text)) c.heart++;
-      if (LAUGH_RE.test(m.text)) c.laugh++;
-      if (QUESTION_RE.test(m.text)) c.question++;
-      p.affectionCount += m.text.match(AFFECTION_RE) ? 1 : 0;
-      p.apologyCount += m.text.match(APOLOGY_RE) ? 1 : 0;
-      p.gratitudeCount += m.text.match(GRATITUDE_RE) ? 1 : 0;
+      const t = textForMatching(m.text);
+      if (EMOJI_RE.test(t)) c.emoji++;
+      if (HEART_RE.test(t)) c.heart++;
+      if (LAUGH_RE.test(t)) c.laugh++;
+      if (QUESTION_RE.test(t)) c.question++;
+      p.affectionCount += t.match(AFFECTION_RE) ? 1 : 0;
+      p.apologyCount += t.match(APOLOGY_RE) ? 1 : 0;
+      p.gratitudeCount += t.match(GRATITUDE_RE) ? 1 : 0;
     }
 
     const prev = i > 0 ? msgs[i - 1] : null;
-    if (prev === null || m.timestamp - prev.timestamp >= SESSION_GAP_MS) {
+    const gap = prev !== null ? m.timestamp - prev.timestamp : 0;
+    if (prev !== null) {
+      longestSilenceMs = Math.max(longestSilenceMs, gap);
+    }
+    if (prev === null || gap >= SESSION_GAP_MS) {
       // 新しい会話セッションの開始
       sessionCount++;
       p.sessionStarts++;
       if (prev !== null) {
         persons[prev.sender].sessionEnds++;
-        longestSilenceMs = Math.max(
-          longestSilenceMs,
-          m.timestamp - prev.timestamp,
-        );
       }
-    } else if (prev.sender !== m.sender) {
-      // セッション内で相手に返信した
-      replyTimes[m.sender].push(m.timestamp - prev.timestamp);
+    } else if (prev.sender !== m.sender && gap >= 0) {
+      // セッション内で相手に返信した(負の間隔は壊れた入力なので除外)
+      replyTimes[m.sender].push(gap);
     }
   }
   persons[msgs[msgs.length - 1].sender].sessionEnds++;
