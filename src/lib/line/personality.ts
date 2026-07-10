@@ -45,6 +45,32 @@ export interface PairPersonality {
 
 const bound = (v: number, lo = -1, hi = 1) => Math.min(hi, Math.max(lo, v));
 
+/**
+ * 実測値と「典型値」の対数比っぽい比較(-1..1)。
+ * x=0で-1、x=typで0、xが典型の3倍で+0.5。実際のトーク履歴の
+ * 計測値(絵文字率0.6%、感嘆符1.5%、計画語0.1%など、想像より一桁
+ * 小さい)に合わせて典型値を校正してある。
+ */
+const rel = (x: number, typ: number) => (x - typ) / (x + typ);
+
+/** ペア内の相対差(-1..1)。二人の違いを必ず浮き上がらせる主成分 */
+const diff = (mine: number, theirs: number, eps: number) =>
+  (mine - theirs) / (mine + theirs + eps);
+
+// 日本語トークの典型値(実データ計測に基づく校正値)
+const TYP = {
+  exclaim: 0.03,
+  hedge: 0.03,
+  concrete: 0.04,
+  warm: 0.05,
+  dry: 0.03,
+  lateNight: 0.12,
+  doubleText: 0.18,
+  avgLen: 14,
+  perDay: 25,
+  hourEntropy: 0.72,
+};
+
 const MBTI_NICKNAMES: Record<string, string> = {
   INTJ: "策士",
   INTP: "理屈屋",
@@ -102,7 +128,8 @@ function axis(
 ): AxisResult {
   const s = bound(score);
   const winner = s >= 0 ? letters[0] : letters[1];
-  const strength = Math.abs(s);
+  // 小さな差も見えるように平方根で非線形に拡大(0.05→0.22, 0.3→0.55, 1→1)
+  const strength = Math.sqrt(Math.abs(s));
   return {
     letters,
     labels,
@@ -112,40 +139,60 @@ function axis(
   };
 }
 
+/** 甘さの複合指標: 感情語+絵文字+ハート+愛情語 */
+function warmth(p: PersonStats): number {
+  const msgs = Math.max(1, p.messageCount);
+  return (
+    p.traits.emotion +
+    p.emojiRate * 0.7 +
+    p.heartRate * 2 +
+    (p.affectionCount / msgs) * 1.5
+  );
+}
+
 function diagnosePerson(
   p: PersonStats,
   partner: PersonStats,
   s: PairStats,
 ): PersonPersonality {
   const t = p.traits;
-  const totalStarts = p.sessionStarts + partner.sessionStarts;
-  const startShare = totalStarts > 0 ? p.sessionStarts / totalStarts : 0.5;
-  const msgShare = p.messageCount / (p.messageCount + partner.messageCount);
+  const q = partner.traits;
+  const startDiff = diff(p.sessionStarts, partner.sessionStarts, 1);
+  const shareDiff = diff(p.messageCount, partner.messageCount, 1);
   const spanDays = Math.max(1, s.spanMs / 86_400_000);
   const perDay = p.messageCount / spanDays;
 
-  // E/I: 口火・発言量・質問・感嘆符
+  // E/I: 口火・発言量・質問・感嘆符・連投。相対差が主成分、絶対値が補正
   const eScore =
-    (startShare - 0.5) * 2 * 0.7 +
-    (msgShare - 0.5) * 2 * 0.5 +
-    (p.questionRate - partner.questionRate) * 2 +
-    (t.exclaim - 0.15) * 0.8 +
-    bound(perDay / 25 - 0.4, -0.3, 0.3);
+    1.1 * startDiff +
+    0.8 * shareDiff +
+    0.8 * diff(p.questionRate, partner.questionRate, 0.01) +
+    0.5 * diff(p.doubleTextRate, partner.doubleTextRate, 0.02) +
+    0.4 * rel(t.exclaim, TYP.exclaim) +
+    0.3 * rel(perDay, TYP.perDay);
 
   // S/N: 具体語 vs 曖昧・想像語
-  const nScore = (t.hedge - 0.1) * 4 - (t.concrete - 0.2) * 2.5;
+  const nScore =
+    0.9 * diff(t.hedge, q.hedge, 0.005) +
+    0.45 * rel(t.hedge, TYP.hedge) -
+    0.9 * diff(t.concrete, q.concrete, 0.005) -
+    0.45 * rel(t.concrete, TYP.concrete);
 
-  // T/F: 感情表現 vs ドライ返答
+  // T/F: 感情表現の温度 vs ドライ返答
   const fScore =
-    (t.emotion - 0.08) * 3 +
-    p.emojiRate * 1.2 +
-    p.heartRate * 2 -
-    (t.dry - 0.12) * 3;
+    1.0 * diff(warmth(p), warmth(partner), 0.005) +
+    0.55 * rel(warmth(p), TYP.warm) -
+    1.0 * diff(t.dry, q.dry, 0.005) -
+    0.55 * rel(t.dry, TYP.dry);
 
-  // J/P: 計画語 vs ノリ語(僅差なら即レス側をJに寄せる)
-  const fastTiebreak =
-    p.medianReplyMs !== null && p.medianReplyMs < 10 * 60_000 ? 0.12 : -0.12;
-  const jScore = (t.plan - t.flex) * 10 + fastTiebreak;
+  // J/P: 計画語 vs ノリ語 + 生活リズムの規則性(時間帯エントロピー)
+  const pfSelf = (t.plan - t.flex) / (t.plan + t.flex + 0.002);
+  const pfPartner = (q.plan - q.flex) / (q.plan + q.flex + 0.002);
+  const jScore =
+    0.8 * pfSelf +
+    0.5 * (pfSelf - pfPartner) +
+    1.6 * (partner.hourEntropy - p.hourEntropy) +
+    1.0 * (TYP.hourEntropy - p.hourEntropy);
 
   const axes = [
     axis(["E", "I"], ["外向", "内向"], eScore),
@@ -161,28 +208,29 @@ function diagnosePerson(
     .slice(0, 2)
     .map((a) => MBTI_AXIS_COMMENTS[a.winner]);
 
-  // ラブタイプ16
+  // ラブタイプ16(こちらも相対+校正絶対値のハイブリッド)
   const chase =
-    (msgShare - 0.5) * 2 * 0.7 +
-    (startShare - 0.5) * 2 * 0.5 +
-    (p.questionRate - partner.questionRate) * 2;
+    0.9 * shareDiff +
+    0.6 * startDiff +
+    0.7 * diff(p.questionRate, partner.questionRate, 0.01) +
+    0.7 * diff(p.doubleTextRate, partner.doubleTextRate, 0.02);
+  const med = p.medianReplyMs;
+  const medPartner = partner.medianReplyMs;
   const quick =
-    p.medianReplyMs === null
+    med === null
       ? -0.3
-      : bound((10 * 60_000 - p.medianReplyMs) / (10 * 60_000), -1, 1);
-  const textCountApprox = Math.max(1, p.messageCount);
+      : 0.6 * bound((5 * 60_000 - med) / (5 * 60_000 + med)) +
+        (medPartner !== null ? 0.4 * diff(medPartner, med, 30_000) : 0);
   const sweet =
-    p.heartRate * 2.5 +
-    p.emojiRate * 1.2 +
-    (p.affectionCount / textCountApprox) * 8 +
-    t.emotion * 1.5 -
-    0.25;
+    0.55 * rel(warmth(p), TYP.warm) +
+    0.45 * diff(warmth(p), warmth(partner), 0.005);
+  const msgs = Math.max(1, p.messageCount);
   const heavy =
-    p.lateNightRate * 3 +
-    bound(perDay / 30, 0, 0.6) +
-    (p.apologyCount / textCountApprox) * 4 +
-    bound(p.avgLength / 70, 0, 0.5) -
-    0.55;
+    0.3 * rel(p.lateNightRate + 0.01, TYP.lateNight) +
+    0.3 * rel(p.doubleTextRate + 0.01, TYP.doubleText) +
+    0.2 * rel(p.apologyCount / msgs + 0.001, 0.004) +
+    0.15 * rel(p.avgLength, TYP.avgLen) +
+    0.15 * rel(perDay, 40);
 
   const key =
     (chase >= 0 ? "追" : "待") +

@@ -14,6 +14,7 @@ import {
   CompareBars,
   HourHistogram,
   Legend,
+  MonthlyChart,
   ShareBar,
   StatTile,
 } from "./charts";
@@ -360,6 +361,24 @@ export function Results({
         </div>
         <CompareBars metrics={compareMetrics} />
       </ChartCard>
+
+      {stats.monthly.length >= 2 && (
+        <ChartCard title="熱量の推移(月別メッセージ数)">
+          <div className="mb-3">
+            <Legend aName={a.name} bName={b.name} />
+          </div>
+          <MonthlyChart monthly={stats.monthly} aName={a.name} bName={b.name} />
+          {stats.heatTrend !== null && (
+            <p className="mt-3 text-xs leading-5 text-ink-secondary">
+              {stats.heatTrend > 1.3
+                ? `直近の熱量は初期の${Math.round(stats.heatTrend * 100)}%。まだ上り坂です。`
+                : stats.heatTrend < 0.7
+                  ? `直近の熱量は初期の${Math.round(stats.heatTrend * 100)}%。落ち着いてきました(悪いことではない)。`
+                  : "熱量はほぼ横ばい。安定飛行中です。"}
+            </p>
+          )}
+        </ChartCard>
+      )}
 
       <ChartCard title="時間帯別メッセージ数">
         <div className="mb-3">

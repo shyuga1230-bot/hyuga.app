@@ -61,6 +61,14 @@ export interface PersonStats {
   hourHistogram: number[];
   /** 性格診断(偏見)用の言語特徴 */
   traits: TextTraits;
+  /** 連投率: 相手の返事を待たず自分のメッセージに続けた割合 */
+  doubleTextRate: number;
+  /** 時間帯の散らばり(0=毎日同じ時間, 1=完全にバラバラ) */
+  hourEntropy: number;
+  /** 週末(土日)のメッセージ率 */
+  weekendRate: number;
+  /** いちばん発言が多い時間帯(0-23) */
+  peakHour: number;
 }
 
 export interface PairStats {
@@ -84,6 +92,13 @@ export interface PairStats {
   totalCallSec: number;
   /** aのメッセージ占有率(0..1) */
   aShare: number;
+  /** 月別メッセージ数(時系列順) */
+  monthly: { label: string; a: number; b: number }[];
+  /**
+   * 熱量トレンド: 期間を3等分した最後の区間の1日あたり通数 ÷ 最初の区間。
+   * 1より大きければ加熱中、小さければ減速中。期間30日未満はnull
+   */
+  heatTrend: number | null;
 }
 
 const SESSION_GAP_MS = 6 * 3600_000;
@@ -158,7 +173,24 @@ function emptyPerson(name: string): PersonStats {
       flex: 0,
       exclaim: 0,
     },
+    doubleTextRate: 0,
+    hourEntropy: 0,
+    weekendRate: 0,
+    peakHour: 12,
   };
+}
+
+/** 時間帯分布の正規化エントロピー(0=一極集中, 1=完全均等) */
+function normalizedEntropy(hist: number[]): number {
+  const total = hist.reduce((x, y) => x + y, 0);
+  if (total === 0) return 0;
+  let h = 0;
+  for (const v of hist) {
+    if (v === 0) continue;
+    const p = v / total;
+    h -= p * Math.log(p);
+  }
+  return h / Math.log(hist.length);
 }
 
 /**
@@ -208,6 +240,9 @@ export function analyzePair(
   let callCount = 0;
   let totalCallSec = 0;
   const activeDaySet = new Set<string>();
+  const doubleTexts: Record<string, number> = { [nameA]: 0, [nameB]: 0 };
+  const weekendCounts: Record<string, number> = { [nameA]: 0, [nameB]: 0 };
+  const monthlyMap = new Map<string, { a: number; b: number }>();
 
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
@@ -221,6 +256,12 @@ export function analyzePair(
       `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`,
     );
     if (date.getHours() < 5) c.lateNight++;
+    if (date.getDay() === 0 || date.getDay() === 6) weekendCounts[m.sender]++;
+    const ym = `${date.getFullYear() % 100}/${date.getMonth() + 1}`;
+    const month = monthlyMap.get(ym) ?? { a: 0, b: 0 };
+    if (m.sender === nameA) month.a++;
+    else month.b++;
+    monthlyMap.set(ym, month);
 
     if (m.kind === "sticker") c.sticker++;
     if (m.kind === "image" || m.kind === "video") c.media++;
@@ -270,6 +311,9 @@ export function analyzePair(
     } else if (prev.sender !== m.sender && gap >= 0) {
       // セッション内で相手に返信した(負の間隔は壊れた入力なので除外)
       replyTimes[m.sender].push(gap);
+    } else if (prev.sender === m.sender && gap >= 0 && gap < 30 * 60_000) {
+      // 相手の返事を待たない連投
+      doubleTexts[m.sender]++;
     }
   }
   persons[msgs[msgs.length - 1].sender].sessionEnds++;
@@ -297,12 +341,36 @@ export function analyzePair(
       flex: rate(c.flex),
       exclaim: rate(c.exclaim),
     };
+    p.doubleTextRate = n > 0 ? doubleTexts[name] / n : 0;
+    p.weekendRate = n > 0 ? weekendCounts[name] / n : 0;
+    p.hourEntropy = normalizedEntropy(p.hourHistogram);
+    p.peakHour = p.hourHistogram.indexOf(Math.max(...p.hourHistogram));
   }
 
   const first = msgs[0].timestamp;
   const lastTs = msgs[msgs.length - 1].timestamp;
   const spanMs = lastTs - first;
   const spanDays = Math.max(1, spanMs / 86_400_000);
+
+  // 熱量トレンド: 期間を3等分して最初と最後の区間の密度を比較
+  let heatTrend: number | null = null;
+  if (spanDays >= 30) {
+    const t1 = first + spanMs / 3;
+    const t2 = first + (spanMs * 2) / 3;
+    let firstCount = 0;
+    let lastCount = 0;
+    for (const m of msgs) {
+      if (m.timestamp < t1) firstCount++;
+      else if (m.timestamp >= t2) lastCount++;
+    }
+    if (firstCount > 0) heatTrend = lastCount / firstCount;
+  }
+
+  const monthly = [...monthlyMap.entries()].map(([label, v]) => ({
+    label,
+    a: v.a,
+    b: v.b,
+  }));
 
   return {
     a: persons[nameA],
@@ -318,5 +386,7 @@ export function analyzePair(
     callCount,
     totalCallSec,
     aShare: persons[nameA].messageCount / msgs.length,
+    monthly,
+    heatTrend,
   };
 }

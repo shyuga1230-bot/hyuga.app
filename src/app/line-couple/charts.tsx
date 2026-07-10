@@ -190,6 +190,53 @@ export function HourHistogram({
   );
 }
 
+/** 月別メッセージ数(積み上げ縦棒)。熱量の推移を見る */
+export function MonthlyChart({
+  monthly,
+  aName,
+  bName,
+}: {
+  monthly: { label: string; a: number; b: number }[];
+  aName: string;
+  bName: string;
+}) {
+  const max = Math.max(...monthly.map((m) => m.a + m.b), 1);
+  // ラベルは最大8個までに間引く
+  const step = Math.ceil(monthly.length / 8);
+  return (
+    <div>
+      <div className="flex h-28 items-end gap-[3px] border-b border-viz-baseline">
+        {monthly.map((m) => (
+          <div
+            key={m.label}
+            className="flex h-full flex-1 flex-col justify-end gap-[2px]"
+            title={`${m.label}月 — ${aName}: ${m.a}通 / ${bName}: ${m.b}通`}
+          >
+            <div
+              className="w-full rounded-t-[3px] bg-series-b"
+              style={{ height: `${(m.b / max) * 100}%` }}
+            />
+            <div
+              className="w-full bg-series-a"
+              style={{
+                height: `${(m.a / max) * 100}%`,
+                borderRadius: m.b === 0 ? "3px 3px 0 0" : 0,
+              }}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="mt-1 flex gap-[3px] text-[10px] tabular-nums text-ink-muted">
+        {monthly.map((m, i) => (
+          <span key={m.label} className="flex-1 text-center">
+            {i % step === 0 ? m.label : ""}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** パワーバランスメーター(-100〜+100、中心基準) */
 export function BalanceMeter({
   aName,
