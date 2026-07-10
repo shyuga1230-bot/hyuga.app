@@ -70,6 +70,18 @@ const DATE_PATTERNS: DatePattern[] = [
   { re: /^(\d{4})[/.年](\d{1,2})[/.月](\d{1,2})日?\s*$/, hasWeekday: false },
 ];
 
+// 和暦(端末の暦設定が和暦の場合): R7/12/20(土) / 令和7年12月20日(土) など
+const ERA_BASE: Record<string, number> = {
+  R: 2018,
+  令和: 2018,
+  H: 1988,
+  平成: 1988,
+  S: 1925,
+  昭和: 1925,
+};
+const ERA_DATE =
+  /^(R|令和|H|平成|S|昭和)\s*(元|\d{1,2})[/.年](\d{1,2})[/.月](\d{1,2})日?\s*(\([^)]+\)|（[^）]+）)?\s*$/;
+
 // 「午前10:23」「午後 11:05」「10:23 AM」「23:45」「12:34:56(秒つき)」
 const TIME_PART =
   "(?:(午前|午後|AM|PM|am|pm)\\s*)?(\\d{1,2}):(\\d{2})(?::\\d{2})?(?:\\s*(AM|PM|am|pm))?";
@@ -166,6 +178,18 @@ function tryParseDateLine(
       : [Number(m[1]), Number(m[2]), Number(m[3])];
     if (mo < 1 || mo > 12 || d < 1 || d > 31) continue;
     return { ms: new Date(y, mo - 1, d).getTime(), hasWeekday: p.hasWeekday };
+  }
+  const em = line.match(ERA_DATE);
+  if (em) {
+    const y = ERA_BASE[em[1]] + (em[2] === "元" ? 1 : Number(em[2]));
+    const mo = Number(em[3]);
+    const d = Number(em[4]);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return {
+        ms: new Date(y, mo - 1, d).getTime(),
+        hasWeekday: em[5] !== undefined,
+      };
+    }
   }
   return null;
 }

@@ -24,7 +24,10 @@ function maskForDiagnostics(raw: string): string {
     .map((l) =>
       l
         .replace(/\t/g, " ⇥ ")
-        .replace(/[^0-9\s:/.()\[\]\-,⇥年月日曜火水木金土午前後AMPamp]/g, "●"),
+        .replace(
+          /[^0-9\s:/.()\[\]\-,⇥年月日曜火水木金土午前後令和平成昭元RHSAMPamp]/g,
+          "●",
+        ),
     )
     .join("\n");
 }
