@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PairStats } from "@/lib/line/analyze";
+import { loveCharacterSvg } from "@/lib/line/character";
 import {
   diagnosePersonalities,
   type AxisResult,
@@ -176,11 +177,21 @@ function PersonalityBlock({
         <div className="text-[11px] text-ink-muted">
           ラブタイプ16(偏見) — {person.love.key}
         </div>
-        <div className="mt-0.5 text-base font-semibold text-foreground">
-          {person.love.name}
-        </div>
-        <div className="text-xs text-ink-secondary">
-          「{person.love.tagline}」
+        <div className="mt-2 flex items-center gap-3">
+          <span
+            className="shrink-0"
+            dangerouslySetInnerHTML={{
+              __html: loveCharacterSvg(person.love.key, 68, person.love.name),
+            }}
+          />
+          <div>
+            <div className="text-base font-semibold text-foreground">
+              {person.love.name}
+            </div>
+            <div className="text-xs text-ink-secondary">
+              「{person.love.tagline}」
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -310,6 +321,29 @@ export function Results({
         </div>
         <div className="mt-4 rounded-xl border border-black/10 p-4 text-center dark:border-white/10">
           <div className="text-xs text-ink-muted">ラブタイプ相性(偏見)</div>
+          <div className="mt-2 flex items-center justify-center gap-3">
+            <span
+              dangerouslySetInnerHTML={{
+                __html: loveCharacterSvg(
+                  personality.a.love.key,
+                  60,
+                  personality.a.love.name,
+                ),
+              }}
+            />
+            <span aria-hidden className="text-sm text-ink-muted">
+              ×
+            </span>
+            <span
+              dangerouslySetInnerHTML={{
+                __html: loveCharacterSvg(
+                  personality.b.love.key,
+                  60,
+                  personality.b.love.name,
+                ),
+              }}
+            />
+          </div>
           <div className="mt-1 text-sm text-ink-secondary">
             {personality.a.love.name} × {personality.b.love.name}
           </div>
