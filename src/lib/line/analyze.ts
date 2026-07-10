@@ -4,6 +4,24 @@ import type { ParsedMessage } from "./parser";
  * 2人分のトーク統計。すべてブラウザ内で計算する。
  */
 
+/** 性格診断(偏見)に使う言語特徴。テキストメッセージ中の出現率 */
+export interface TextTraits {
+  /** 数字・時刻・場所など具体情報を含む率(S寄り) */
+  concrete: number;
+  /** 「かも」「なんか」「気がする」等の曖昧・想像表現率(N寄り) */
+  hedge: number;
+  /** 感情語(嬉しい・楽しい・やばい等)率(F寄り) */
+  emotion: number;
+  /** 「了解」「なるほど」等の短いドライ返答・分析語率(T寄り) */
+  dry: number;
+  /** 予定・予約・日程など計画語率(J寄り) */
+  plan: number;
+  /** 「どっちでも」「ノリで」等の無計画語率(P寄り) */
+  flex: number;
+  /** 感嘆符率 */
+  exclaim: number;
+}
+
 export interface PersonStats {
   name: string;
   messageCount: number;
@@ -41,6 +59,8 @@ export interface PersonStats {
   unsentCount: number;
   /** 時間帯ヒストグラム(24要素) */
   hourHistogram: number[];
+  /** 性格診断(偏見)用の言語特徴 */
+  traits: TextTraits;
 }
 
 export interface PairStats {
@@ -84,6 +104,21 @@ const AFFECTION_RE =
 const APOLOGY_RE = /(ごめん|ゴメン|すまん|すみません|申し訳|sorry|my bad)/i;
 const GRATITUDE_RE = /(ありがとう|ありがと|感謝|thank|thx|サンキュ)/i;
 
+// 性格診断(偏見)用の言語特徴
+const CONCRETE_RE = /[0-9０-９]|時半|何時|駅|円|番線|丁目|住所|地図/;
+const HEDGE_RE =
+  /(かも|なんか|多分|たぶん|きっと|気がする|っぽい|ような気|もしかして|エモ|雰囲気|イメージ)/;
+const EMOTION_RE =
+  /(嬉し|うれし|楽し|たのし|悲し|かなし|寂し|さみし|さびし|つらい|辛い|最高|幸せ|しあわせ|泣け|泣い|感動|やば|尊い|テンション|happy)/i;
+const DRY_ACK_RE =
+  /^(了解|りょ+|おけ+|おっけ+|ok|okay|うん+|うい+|はい+|わかった|わかりました|なるほど|ふ[ーぅ]ん|へ[ーぇ]+|そうなんだ|それな|たしかに|確かに|そだね)[。.!！?？~〜ー\s]*$/i;
+const ANALYTIC_RE = /(なぜ|理由|原因|つまり|要するに|効率|コスパ|論理|根拠|客観|整理する)/;
+const PLAN_RE =
+  /(予定|予約|何時に|集合|日程|スケジュール|段取り|確認しと|締切|しめきり|リマインド|決めよ|決めとこ|決めない|カレンダー)/;
+const FLEX_RE =
+  /(どっちでも|どちらでも|なんでもいい|何でもいい|いつでもいい|適当に|てきとー|テキトー|気分で|ノリで|そのうち|あとで考え|行き当たり)/;
+const EXCLAIM_RE = /[!！]/;
+
 function median(values: number[]): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((x, y) => x - y);
@@ -114,6 +149,15 @@ function emptyPerson(name: string): PersonStats {
     gratitudeCount: 0,
     unsentCount: 0,
     hourHistogram: new Array(24).fill(0),
+    traits: {
+      concrete: 0,
+      hedge: 0,
+      emotion: 0,
+      dry: 0,
+      plan: 0,
+      flex: 0,
+      exclaim: 0,
+    },
   };
 }
 
@@ -137,21 +181,26 @@ export function analyzePair(
   };
   const replyTimes: Record<string, number[]> = { [nameA]: [], [nameB]: [] };
 
-  const counters: Record<
-    string,
-    {
-      textCount: number;
-      lateNight: number;
-      emoji: number;
-      heart: number;
-      laugh: number;
-      question: number;
-      sticker: number;
-      media: number;
-    }
-  > = {
-    [nameA]: { textCount: 0, lateNight: 0, emoji: 0, heart: 0, laugh: 0, question: 0, sticker: 0, media: 0 },
-    [nameB]: { textCount: 0, lateNight: 0, emoji: 0, heart: 0, laugh: 0, question: 0, sticker: 0, media: 0 },
+  const emptyCounter = () => ({
+    textCount: 0,
+    lateNight: 0,
+    emoji: 0,
+    heart: 0,
+    laugh: 0,
+    question: 0,
+    sticker: 0,
+    media: 0,
+    concrete: 0,
+    hedge: 0,
+    emotion: 0,
+    dry: 0,
+    plan: 0,
+    flex: 0,
+    exclaim: 0,
+  });
+  const counters: Record<string, ReturnType<typeof emptyCounter>> = {
+    [nameA]: emptyCounter(),
+    [nameB]: emptyCounter(),
   };
 
   let longestSilenceMs = 0;
@@ -192,6 +241,18 @@ export function analyzePair(
       p.affectionCount += t.match(AFFECTION_RE) ? 1 : 0;
       p.apologyCount += t.match(APOLOGY_RE) ? 1 : 0;
       p.gratitudeCount += t.match(GRATITUDE_RE) ? 1 : 0;
+      if (CONCRETE_RE.test(t)) c.concrete++;
+      if (HEDGE_RE.test(t)) c.hedge++;
+      if (EMOTION_RE.test(t)) c.emotion++;
+      if (
+        (t.trim().length <= 12 && DRY_ACK_RE.test(t.trim())) ||
+        ANALYTIC_RE.test(t)
+      ) {
+        c.dry++;
+      }
+      if (PLAN_RE.test(t)) c.plan++;
+      if (FLEX_RE.test(t)) c.flex++;
+      if (EXCLAIM_RE.test(t)) c.exclaim++;
     }
 
     const prev = i > 0 ? msgs[i - 1] : null;
@@ -226,6 +287,16 @@ export function analyzePair(
     p.heartRate = c.textCount > 0 ? c.heart / c.textCount : 0;
     p.laughRate = c.textCount > 0 ? c.laugh / c.textCount : 0;
     p.questionRate = c.textCount > 0 ? c.question / c.textCount : 0;
+    const rate = (v: number) => (c.textCount > 0 ? v / c.textCount : 0);
+    p.traits = {
+      concrete: rate(c.concrete),
+      hedge: rate(c.hedge),
+      emotion: rate(c.emotion),
+      dry: rate(c.dry),
+      plan: rate(c.plan),
+      flex: rate(c.flex),
+      exclaim: rate(c.exclaim),
+    };
   }
 
   const first = msgs[0].timestamp;
