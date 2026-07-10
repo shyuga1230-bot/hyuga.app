@@ -7,6 +7,7 @@ import {
   type PairPersonality,
   type PersonPersonality,
 } from "@/lib/line/personality";
+import { buildReport } from "@/lib/line/report";
 import type { Verdict } from "@/lib/line/verdict";
 import { fmtDate, fmtDuration, pct } from "@/lib/line/format";
 import {
@@ -20,7 +21,13 @@ import {
   StatTile,
 } from "./charts";
 
-function CopyButton({ text }: { text: string }) {
+function CopyButton({
+  text,
+  label = "結果をコピー",
+}: {
+  text: string;
+  label?: string;
+}) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const [showManual, setShowManual] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -75,7 +82,7 @@ function CopyButton({ text }: { text: string }) {
           ? "コピーしました ✓"
           : state === "failed"
             ? "コピーできませんでした"
-            : "結果をコピー"}
+            : label}
       </button>
       {showManual && (
         <div className="w-full">
@@ -209,6 +216,18 @@ export function Results({
 }) {
   const { a, b } = stats;
   const personality = useMemo(() => diagnosePersonalities(stats), [stats]);
+  const report = useMemo(
+    () => buildReport(stats, verdict, personality),
+    [stats, verdict, personality],
+  );
+  const reportText = useMemo(
+    () =>
+      [
+        `【ふたりの偏見レポート】${a.name} × ${b.name}`,
+        ...report.sections.map((sec) => `■ ${sec.heading}\n${sec.body}`),
+      ].join("\n\n"),
+    [report, a.name, b.name],
+  );
 
   const compareMetrics = [
     {
@@ -426,6 +445,23 @@ export function Results({
         />
       </ChartCard>
 
+      {/* 偏見レポート */}
+      <section className="rounded-xl border border-black/10 bg-viz-surface p-5 dark:border-white/10">
+        <h3 className="mb-4 text-sm font-medium text-foreground">
+          ふたりの偏見レポート
+        </h3>
+        <div className="flex flex-col gap-4">
+          {report.sections.map((sec) => (
+            <div key={sec.heading}>
+              <h4 className="mb-1 text-xs font-bold tracking-wide text-ink-muted">
+                {sec.heading}
+              </h4>
+              <p className="text-sm leading-7 text-foreground">{sec.body}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
       {/* 細かい偏見 */}
       {verdict.observations.length > 0 && (
         <section className="rounded-xl border border-black/10 bg-viz-surface p-4 dark:border-white/10">
@@ -450,6 +486,7 @@ export function Results({
 
       <div className="flex flex-wrap justify-center gap-3">
         <CopyButton text={buildShareText(stats, verdict, personality)} />
+        <CopyButton text={reportText} label="レポートをコピー" />
         <button
           type="button"
           onClick={onReset}
